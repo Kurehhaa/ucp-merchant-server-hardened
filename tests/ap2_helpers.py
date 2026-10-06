@@ -126,3 +126,15 @@ async def complete_with_mandate(
         f"/api/v1/checkout/{session_id}/complete",
         json={"cart_mandate": mandate.model_dump(mode="json")},
     )
+
+
+# --- API security helpers shared by the test modules ------------------------
+
+ADMIN_KEY = "test-admin-key"
+ADMIN_HEADERS = {"X-API-Key": ADMIN_KEY}
+
+
+def public_resolver(host: str, port: int) -> list[tuple]:
+    """Stand-in for DNS: every host resolves to a public address (no network)."""
+    return [(2, 1, 6, "", ("93.184.216.34", port))]
+

@@ -3,7 +3,13 @@
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from tests.ap2_helpers import AgentSimulator, complete_with_mandate
+from tests.ap2_helpers import (
+    ADMIN_HEADERS,
+    ADMIN_KEY,
+    AgentSimulator,
+    complete_with_mandate,
+    public_resolver,
+)
 from ucp_merchant.api import create_app
 from ucp_merchant.config import UCPMerchantSettings
 
@@ -12,6 +18,7 @@ from ucp_merchant.config import UCPMerchantSettings
 def settings():
     return UCPMerchantSettings(
         environment="testing",
+        admin_api_key=ADMIN_KEY,
     )
 
 
@@ -22,13 +29,16 @@ def app(settings):
     # in OrderTracker.notify_update (the `event` kwarg clashes with
     # structlog's implicit first `event` positional parameter).
     application.state.order_manager._tracker = None
+    application.state.webhook_manager._resolver = public_resolver
     return application
 
 
 @pytest.fixture
 async def client(app):
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as c:
+    async with AsyncClient(
+        transport=transport, base_url="http://test", headers=ADMIN_HEADERS
+    ) as c:
         yield c
 
 
@@ -42,11 +52,15 @@ def agent(app):
 async def demo_client():
     """Client for an app with the server-side demo signing endpoints enabled."""
     application = create_app(
-        UCPMerchantSettings(environment="testing", ap2_demo_mode=True)
+        UCPMerchantSettings(
+            environment="testing", ap2_demo_mode=True, admin_api_key=ADMIN_KEY
+        )
     )
     application.state.order_manager._tracker = None
     transport = ASGITransport(app=application)
-    async with AsyncClient(transport=transport, base_url="http://test") as c:
+    async with AsyncClient(
+        transport=transport, base_url="http://test", headers=ADMIN_HEADERS
+    ) as c:
         yield c
 
 

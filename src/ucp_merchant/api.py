@@ -13,13 +13,16 @@ Exposes REST endpoints for:
 
 from __future__ import annotations
 
+import hmac
 import json
+import uuid
 from typing import Any
 
 import structlog
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Security
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
@@ -170,14 +173,18 @@ def create_app(settings: UCPMerchantSettings | None = None) -> FastAPI:
         redoc_url="/redoc",
     )
 
-    # CORS
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+    # CORS: shopping agents are server-side clients, so no browser origin is
+    # allowed unless configured.  Credentials are never combined with a
+    # wildcard origin.
+    cors_origins = settings.cors_origins
+    if cors_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=cors_origins,
+            allow_credentials="*" not in cors_origins,
+            allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
+            allow_headers=["Content-Type", "X-API-Key"],
+        )
 
     # ---- Service layer wiring ----------------------------------------------
     catalog = ProductCatalog()
@@ -191,6 +198,7 @@ def create_app(settings: UCPMerchantSettings | None = None) -> FastAPI:
     webhook_manager = WebhookManager(
         timeout=settings.webhook_timeout_seconds,
         max_retries=settings.webhook_max_retries,
+        allow_private_hosts=settings.webhook_allow_private_hosts,
     )
     mcp_handler = MCPToolHandler(
         checkout_manager=checkout_manager,
@@ -200,6 +208,28 @@ def create_app(settings: UCPMerchantSettings | None = None) -> FastAPI:
         mandate_verifier=mandate_verifier,
         require_mandate=settings.ap2_require_mandate,
     )
+
+    admin_key_header = APIKeyHeader(
+        name="X-API-Key",
+        auto_error=False,
+        description="Merchant admin key (ADMIN_API_KEY).",
+    )
+
+    def require_admin(api_key: str | None = Security(admin_key_header)) -> None:
+        """Guard for merchant-admin endpoints (orders management, webhooks, keys)."""
+        if not settings.admin_api_key:
+            raise HTTPException(
+                status_code=403,
+                detail="Admin endpoints are disabled: set ADMIN_API_KEY to enable them.",
+            )
+        if api_key is None or not hmac.compare_digest(
+            api_key.encode(), settings.admin_api_key.encode()
+        ):
+            raise HTTPException(
+                status_code=401,
+                detail="Missing or invalid API key.",
+                headers={"WWW-Authenticate": "ApiKey"},
+            )
 
     def require_demo_mode() -> None:
         """Guard for endpoints that sign with server-held private keys."""
@@ -221,6 +251,7 @@ def create_app(settings: UCPMerchantSettings | None = None) -> FastAPI:
     app.state.order_manager = order_manager
     app.state.key_manager = key_manager
     app.state.mandate_verifier = mandate_verifier
+    app.state.webhook_manager = webhook_manager
 
     # ======================================================================
     # HEALTH
@@ -470,7 +501,7 @@ def create_app(settings: UCPMerchantSettings | None = None) -> FastAPI:
         info = key_manager.generate_key_pair()
         return info.model_dump(mode="json")
 
-    @app.get("/api/v1/payments/keys", tags=["payments"])
+    @app.get("/api/v1/payments/keys", tags=["payments"], dependencies=[Depends(require_admin)])
     async def list_keys() -> dict[str, Any]:
         """List all generated key pairs."""
         keys = key_manager.list_keys()
@@ -569,7 +600,7 @@ def create_app(settings: UCPMerchantSettings | None = None) -> FastAPI:
     # ORDERS
     # ======================================================================
 
-    @app.get("/api/v1/orders", tags=["orders"])
+    @app.get("/api/v1/orders", tags=["orders"], dependencies=[Depends(require_admin)])
     async def list_orders() -> dict[str, Any]:
         """List all orders."""
         orders = order_manager.list_orders()
@@ -587,7 +618,7 @@ def create_app(settings: UCPMerchantSettings | None = None) -> FastAPI:
         except OrderNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    @app.post("/api/v1/orders/{order_id}/advance", tags=["orders"])
+    @app.post("/api/v1/orders/{order_id}/advance", tags=["orders"], dependencies=[Depends(require_admin)])
     async def advance_order(order_id: str) -> dict[str, Any]:
         """Advance the order to the next state."""
         try:
@@ -598,7 +629,7 @@ def create_app(settings: UCPMerchantSettings | None = None) -> FastAPI:
         except InvalidOrderStateError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    @app.post("/api/v1/orders/{order_id}/cancel", tags=["orders"])
+    @app.post("/api/v1/orders/{order_id}/cancel", tags=["orders"], dependencies=[Depends(require_admin)])
     async def cancel_order(order_id: str) -> dict[str, Any]:
         """Cancel an order."""
         try:
@@ -609,7 +640,7 @@ def create_app(settings: UCPMerchantSettings | None = None) -> FastAPI:
         except InvalidOrderStateError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    @app.post("/api/v1/orders/{order_id}/simulate-fulfillment", tags=["orders"])
+    @app.post("/api/v1/orders/{order_id}/simulate-fulfillment", tags=["orders"], dependencies=[Depends(require_admin)])
     async def simulate_fulfillment(order_id: str) -> dict[str, Any]:
         """Fast-forward an order to SHIPPED state with tracking info."""
         try:
@@ -642,7 +673,7 @@ def create_app(settings: UCPMerchantSettings | None = None) -> FastAPI:
     # WEBHOOKS
     # ======================================================================
 
-    @app.post("/api/v1/webhooks", tags=["webhooks"])
+    @app.post("/api/v1/webhooks", tags=["webhooks"], dependencies=[Depends(require_admin)])
     async def register_webhook(req: RegisterWebhookRequest) -> dict[str, Any]:
         """Register a webhook endpoint for order events."""
         try:
@@ -653,7 +684,7 @@ def create_app(settings: UCPMerchantSettings | None = None) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    @app.get("/api/v1/webhooks", tags=["webhooks"])
+    @app.get("/api/v1/webhooks", tags=["webhooks"], dependencies=[Depends(require_admin)])
     async def list_webhooks() -> dict[str, Any]:
         """List all registered webhooks."""
         webhooks = webhook_manager.list_webhooks()
@@ -691,18 +722,25 @@ def create_app(settings: UCPMerchantSettings | None = None) -> FastAPI:
     async def generic_exception_handler(
         request: Request, exc: Exception
     ) -> JSONResponse:
-        """Catch-all error handler returning a structured error response."""
+        """Catch-all: log the details, return only a reference to the client."""
+        error_id = uuid.uuid4().hex[:12]
         logger.error(
             "unhandled_exception",
+            error_id=error_id,
             error=str(exc),
             path=request.url.path,
             exc_info=True,
+        )
+        detail = (
+            str(exc)
+            if settings.expose_error_details
+            else f"An unexpected error occurred (reference: {error_id})."
         )
         return JSONResponse(
             status_code=500,
             content=ErrorResponse(
                 error="Internal server error",
-                detail=str(exc),
+                detail=detail,
                 status_code=500,
             ).model_dump(),
         )

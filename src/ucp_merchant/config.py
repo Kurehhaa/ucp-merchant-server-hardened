@@ -50,6 +50,27 @@ class UCPMerchantSettings(BaseSettings):
     # Webhook settings
     webhook_timeout_seconds: float = 10.0
     webhook_max_retries: int = 3
+    # Allow webhook URLs that are plain http or point at private / loopback
+    # addresses.  Needed for local demos only: in any shared deployment this
+    # lets a caller make the server send requests to its internal network.
+    webhook_allow_private_hosts: bool = False
+
+    # API security
+    # Key required (header ``X-API-Key``) for merchant-admin endpoints: order
+    # management, webhooks, key listing.  When empty those endpoints are
+    # disabled rather than left open.
+    admin_api_key: str = ""
+    # Comma-separated browser origins allowed to call the API cross-origin.
+    # Shopping agents are server-side clients and do not need CORS, so the
+    # default allows none.
+    cors_allow_origins: str = ""
+    # Include exception text in 500 responses (never enable in production).
+    expose_error_details: bool = False
+
+    @property
+    def cors_origins(self) -> list[str]:
+        """``cors_allow_origins`` as a clean list."""
+        return [o.strip() for o in self.cors_allow_origins.split(",") if o.strip()]
 
 
 def get_settings() -> UCPMerchantSettings:

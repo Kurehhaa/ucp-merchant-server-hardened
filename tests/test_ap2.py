@@ -9,10 +9,13 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from tests.ap2_helpers import (
+    ADMIN_HEADERS,
+    ADMIN_KEY,
     SHIPPING_ADDRESS,
     AgentSimulator,
     complete_with_mandate,
     create_ready_session,
+    public_resolver,
 )
 from ucp_merchant.api import create_app
 from ucp_merchant.config import UCPMerchantSettings
@@ -41,7 +44,9 @@ VERIFY_INTENT = "/api/v1/payments/verify/intent"
 
 
 def _make_app(**overrides):
+    overrides.setdefault("admin_api_key", ADMIN_KEY)
     application = create_app(UCPMerchantSettings(environment="testing", **overrides))
+    application.state.webhook_manager._resolver = public_resolver
     # Same workaround as tests/test_api.py (OrderTracker structlog kwarg clash).
     application.state.order_manager._tracker = None
     return application
@@ -54,7 +59,9 @@ def app():
 
 @pytest.fixture
 async def client(app):
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test", headers=ADMIN_HEADERS
+    ) as c:
         yield c
 
 
