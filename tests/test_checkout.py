@@ -85,8 +85,9 @@ class TestStateMachine:
                 )
             ],
         )
+        # Missing data the agent can still supply is INCOMPLETE, not an escalation.
         result = sm.evaluate_readiness(session)
-        assert result == CheckoutState.REQUIRES_ESCALATION
+        assert result == CheckoutState.INCOMPLETE
 
     def test_evaluate_readiness_all_fields_present(self):
         sm = CheckoutStateMachine()
@@ -396,3 +397,133 @@ class TestTotalsCalculator:
         assert result.shipping_cost.amount == 5.99
         # Total: 100 + 10 (tax) + 5.99 (shipping) = 115.99
         assert result.total.amount == 115.99
+
+
+ADDRESS = {
+    "full_name": "Test User",
+    "line1": "123 Main St",
+    "city": "SF",
+    "state": "CA",
+    "postal_code": "94105",
+    "country": "US",
+}
+
+
+def _ready_session(manager, product_id="laptop-001", quantity=1):
+    session = manager.create_session([{"product_id": product_id, "quantity": quantity}])
+    return manager.update_session(
+        session.id,
+        {"shipping_address": ADDRESS, "shipping_option_id": "shipping_standard"},
+    )
+
+
+class TestStateMachineGraph:
+    @pytest.mark.parametrize("target", [
+        CheckoutState.INCOMPLETE,
+        CheckoutState.REQUIRES_ESCALATION,
+    ])
+    def test_ready_can_move_back(self, target):
+        sm = CheckoutStateMachine()
+        session = CheckoutSession(id="t", state=CheckoutState.READY_FOR_COMPLETE)
+        assert sm.transition(session, target).state == target
+
+    @pytest.mark.parametrize("final", [CheckoutState.COMPLETED, CheckoutState.ABANDONED])
+    @pytest.mark.parametrize("target", list(CheckoutState))
+    def test_terminal_states_have_no_exits(self, final, target):
+        sm = CheckoutStateMachine()
+        session = CheckoutSession(id="t", state=final)
+        with pytest.raises(InvalidTransitionError):
+            sm.transition(session, target)
+
+    def test_escalation_reasons_take_priority_over_missing_data(self):
+        sm = CheckoutStateMachine()
+        session = CheckoutSession(id="t")
+        assert (
+            sm.evaluate_readiness(session, ["out of stock"])
+            == CheckoutState.REQUIRES_ESCALATION
+        )
+
+    def test_evaluate_readiness_does_not_mutate(self):
+        sm = CheckoutStateMachine()
+        session = CheckoutSession(id="t")
+        sm.evaluate_readiness(session, ["out of stock"])
+        assert session.state == CheckoutState.INCOMPLETE
+        assert session.missing_fields == []
+        assert session.escalation_reasons == []
+
+
+class TestSessionStateTracking:
+    def test_new_empty_session_lists_what_is_missing(self, session_manager):
+        session = session_manager.create_session()
+        assert session.state == CheckoutState.INCOMPLETE
+        assert "No items in cart" in session.missing_fields
+        assert "Shipping address required" in session.missing_fields
+        assert session.escalation_reasons == []
+
+    def test_items_only_session_is_incomplete_not_escalated(self, session_manager):
+        session = session_manager.create_session(
+            [{"product_id": "laptop-001", "quantity": 1}]
+        )
+        assert session.state == CheckoutState.INCOMPLETE
+        assert session.escalation_reasons == []
+        assert session.missing_fields == [
+            "Shipping address required",
+            "Shipping method not selected",
+        ]
+
+    def test_filling_everything_makes_session_ready(self, session_manager):
+        session = _ready_session(session_manager)
+        assert session.state == CheckoutState.READY_FOR_COMPLETE
+        assert session.missing_fields == []
+
+    def test_removing_all_items_sends_ready_cart_back_to_incomplete(self, session_manager):
+        session = _ready_session(session_manager)
+        updated = session_manager.update_session(
+            session.id, {"remove_items": ["laptop-001"]}
+        )
+        assert updated.state == CheckoutState.INCOMPLETE
+        assert updated.missing_fields == ["No items in cart"]
+
+    def test_emptied_cart_cannot_be_completed(self, session_manager):
+        """Regression: a ready cart whose items were removed used to complete."""
+        session = _ready_session(session_manager)
+        session_manager.update_session(session.id, {"remove_items": ["laptop-001"]})
+        with pytest.raises(InvalidTransitionError):
+            session_manager.complete_session(session.id)
+        assert session_manager.get_session(session.id).state == CheckoutState.INCOMPLETE
+
+    def test_cart_can_become_ready_again_after_refilling(self, session_manager):
+        session = _ready_session(session_manager)
+        session_manager.update_session(session.id, {"remove_items": ["laptop-001"]})
+        refilled = session_manager.update_session(
+            session.id, {"add_items": [{"product_id": "kb-001", "quantity": 1}]}
+        )
+        assert refilled.state == CheckoutState.READY_FOR_COMPLETE
+
+    def test_stock_shortfall_requires_escalation(self, session_manager, catalog):
+        session = _ready_session(session_manager)
+        # Someone else buys the stock after the cart was filled in.
+        catalog.update_stock("laptop-001", -catalog.get("laptop-001").stock)
+        with pytest.raises(InvalidTransitionError):
+            session_manager.complete_session(session.id)
+        current = session_manager.get_session(session.id)
+        assert current.state == CheckoutState.REQUIRES_ESCALATION
+        assert any("laptop" in r.lower() for r in current.escalation_reasons)
+
+    def test_escalation_clears_when_stock_returns(self, session_manager, catalog):
+        session = _ready_session(session_manager)
+        original = catalog.get("laptop-001").stock
+        catalog.update_stock("laptop-001", -original)
+        with pytest.raises(InvalidTransitionError):
+            session_manager.complete_session(session.id)
+        catalog.update_stock("laptop-001", original)
+        done = session_manager.complete_session(session.id)
+        assert done.state == CheckoutState.COMPLETED
+        assert done.escalation_reasons == []
+
+    def test_completed_session_cannot_be_completed_twice(self, session_manager):
+        session = _ready_session(session_manager)
+        session_manager.complete_session(session.id)
+        with pytest.raises(InvalidTransitionError):
+            session_manager.complete_session(session.id)
+

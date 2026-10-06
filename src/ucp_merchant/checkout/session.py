@@ -226,10 +226,14 @@ class CheckoutSessionManager:
         from ucp_merchant.checkout.state_machine import InvalidTransitionError
 
         session = self.get_session(session_id)
+
+        # Never trust the stored state: stock or contents may have changed
+        # since the last update, so evaluate the cart as it is right now.
+        if session.state in (CheckoutState.COMPLETED, CheckoutState.ABANDONED):
+            raise InvalidTransitionError(session.state, CheckoutState.COMPLETED)
+        session = self._recalculate(session)
         if session.state != CheckoutState.READY_FOR_COMPLETE:
-            evaluated = self._state_machine.evaluate_readiness(session)
-            if evaluated != CheckoutState.READY_FOR_COMPLETE:
-                raise InvalidTransitionError(session.state, CheckoutState.COMPLETED)
+            raise InvalidTransitionError(session.state, CheckoutState.COMPLETED)
         return session
 
     def complete_session(self, session_id: str) -> CheckoutSession:
@@ -251,10 +255,6 @@ class CheckoutSessionManager:
             If the session is not ready for completion.
         """
         session = self.assert_ready_for_completion(session_id)
-
-        # If the session isn't explicitly READY_FOR_COMPLETE, move it there
-        if session.state != CheckoutState.READY_FOR_COMPLETE:
-            self._state_machine.transition(session, CheckoutState.READY_FOR_COMPLETE)
 
         self._state_machine.transition(session, CheckoutState.COMPLETED)
 
@@ -333,19 +333,20 @@ class CheckoutSessionManager:
         return session
 
     def _recalculate(self, session: CheckoutSession) -> CheckoutSession:
-        """Recalculate totals and re-evaluate state."""
+        """Recalculate totals, then refresh missing fields and state."""
         session = self._totals.calculate(session)
-        evaluated_state = self._state_machine.evaluate_readiness(session)
-        if evaluated_state != session.state:
-            try:
-                self._state_machine.transition(session, evaluated_state)
-            except Exception:
-                # If the transition isn't valid from the current state,
-                # log and leave the state as-is.
-                logger.debug(
-                    "state_evaluation_skipped",
-                    session_id=session.id,
-                    current=session.state.value,
-                    evaluated=evaluated_state.value,
+        return self._state_machine.sync(session, self._escalation_reasons(session))
+
+    def _escalation_reasons(self, session: CheckoutSession) -> list[str]:
+        """Problems only a human buyer can resolve (currently: stock shortfalls)."""
+        reasons: list[str] = []
+        for item in session.line_items:
+            product = self._catalog.get(item.product_id)
+            if product is None:
+                reasons.append(f"{item.product_name!r} is no longer in the catalog")
+            elif product.stock < item.quantity:
+                reasons.append(
+                    f"Only {product.stock} of {item.product_name!r} available "
+                    f"(cart has {item.quantity})"
                 )
-        return session
+        return reasons

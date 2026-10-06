@@ -159,27 +159,27 @@ curl -X POST http://localhost:8011/api/v1/testing/simulate-fulfillment/{order_id
 ## Checkout State Machine
 
 ```
-                    +------------+
-                    | INCOMPLETE |  (missing address or shipping)
-                    +-----+------+
-                          |
-              +-----------+-----------+
-              |                       |
-    +---------v----------+   +--------v-----------+
-    | REQUIRES_ESCALATION|   | READY_FOR_COMPLETE |
-    | (needs human input)|   | (all fields filled)|
-    +---------+----------+   +--------+-----------+
-              |                       |
-              +-----------+-----------+
-                          |
-                   +------v------+
-                   |  COMPLETED  |
-                   +------+------+
-                          |
-                   +------v------+
-                   |    ORDER    | -> confirmed -> processing -> shipped -> delivered
-                   +-------------+
+   INCOMPLETE  <------------->  READY_FOR_COMPLETE  ------>  COMPLETED  ->  ORDER
+       ^                              ^                                 (confirmed -> processing
+       |                              |                                  -> shipped -> delivered)
+       +--> REQUIRES_ESCALATION <-----+
+   (any open state) ------------------------------------>  ABANDONED
 ```
+
+The three open states are *derived* from the cart and are re-evaluated after
+every update, so a cart can move between them in both directions (for example,
+removing every item from a ready cart sends it back to `incomplete`).
+`completed` and `abandoned` are final.
+
+| State | Meaning | Where to look |
+|---|---|---|
+| `incomplete` | Data is missing; the agent can supply it | `missing_fields` |
+| `requires_escalation` | A human buyer must step in (e.g. an item is no longer in stock in the requested quantity) | `escalation_reasons` |
+| `ready_for_complete` | Everything is present and nothing needs a human | -- |
+
+`POST /checkout/{id}/complete` re-evaluates the cart at that moment instead of
+trusting the stored state, so a stale `ready_for_complete` can never produce an
+order.
 
 ---
 

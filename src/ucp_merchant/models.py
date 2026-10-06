@@ -168,7 +168,9 @@ class CheckoutSession(BaseModel):
     completed_at: datetime | None = None
     order_id: str | None = None
 
-    # Escalation tracking
+    # Why the session is not ready: data the agent can still supply ...
+    missing_fields: list[str] = Field(default_factory=list)
+    # ... and problems only a human buyer can resolve.
     escalation_reasons: list[str] = Field(default_factory=list)
 
 
