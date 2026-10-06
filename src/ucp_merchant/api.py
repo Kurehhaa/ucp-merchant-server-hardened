@@ -17,14 +17,13 @@ import json
 from typing import Any
 
 import structlog
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from common import ErrorResponse, HealthResponse
-
 from ucp_merchant.catalog.products import ProductCatalog
 from ucp_merchant.catalog.search import CatalogSearch
 from ucp_merchant.checkout.session import CheckoutSessionManager, SessionNotFoundError
@@ -45,8 +44,8 @@ from ucp_merchant.orders.lifecycle import (
 )
 from ucp_merchant.orders.tracking import OrderTracker
 from ucp_merchant.orders.webhooks import WebhookManager
-from ucp_merchant.payments.ap2_verification import MandateVerifier
-from ucp_merchant.payments.keys import KeyManager
+from ucp_merchant.payments.ap2_verification import MandateRejected, MandateVerifier
+from ucp_merchant.payments.keys import InvalidKeyError, KeyManager
 
 logger = structlog.get_logger(__name__)
 
@@ -76,11 +75,36 @@ class UpdateCheckoutRequest(BaseModel):
     discount_code: str | None = None
 
 
+class CompleteCheckoutRequest(BaseModel):
+    """Optional body for POST /api/v1/checkout/{session_id}/complete."""
+
+    cart_mandate: CartMandate | None = Field(
+        default=None,
+        description=(
+            "Signed AP2 cart mandate authorising this checkout. Required unless "
+            "the server runs with AP2_REQUIRE_MANDATE=false."
+        ),
+    )
+
+
+class RegisterKeyRequest(BaseModel):
+    """Body for POST /api/v1/payments/keys/register."""
+
+    jwk: dict[str, Any] = Field(
+        ...,
+        description="EC P-256 *public* JWK. Private key material ('d') is rejected.",
+    )
+
+
 class VerifyCartMandateRequest(BaseModel):
     """Body for POST /api/v1/payments/verify/cart."""
 
     mandate: CartMandate
     expected_total: float | None = None
+    session_id: str | None = Field(
+        default=None,
+        description="Also check the mandate against this checkout session.",
+    )
 
 
 class VerifyIntentMandateRequest(BaseModel):
@@ -173,7 +197,22 @@ def create_app(settings: UCPMerchantSettings | None = None) -> FastAPI:
         catalog_search=catalog_search,
         catalog=catalog,
         order_manager=order_manager,
+        mandate_verifier=mandate_verifier,
+        require_mandate=settings.ap2_require_mandate,
     )
+
+    def require_demo_mode() -> None:
+        """Guard for endpoints that sign with server-held private keys."""
+        if not settings.ap2_demo_mode:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    "Demo signing endpoints are disabled. Agents should sign "
+                    "mandates locally and register only their public key via "
+                    "POST /api/v1/payments/keys/register "
+                    "(set AP2_DEMO_MODE=true to enable the demo endpoints)."
+                ),
+            )
 
     # Expose on app.state for testing
     app.state.settings = settings
@@ -181,6 +220,7 @@ def create_app(settings: UCPMerchantSettings | None = None) -> FastAPI:
     app.state.checkout_manager = checkout_manager
     app.state.order_manager = order_manager
     app.state.key_manager = key_manager
+    app.state.mandate_verifier = mandate_verifier
 
     # ======================================================================
     # HEALTH
@@ -306,13 +346,46 @@ def create_app(settings: UCPMerchantSettings | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/api/v1/checkout/{session_id}/complete", tags=["checkout"])
-    async def complete_checkout(session_id: str) -> dict[str, Any]:
-        """Complete a checkout session and create an order."""
+    async def complete_checkout(
+        session_id: str, req: CompleteCheckoutRequest | None = None
+    ) -> dict[str, Any]:
+        """Complete a checkout session and create an order.
+
+        Unless the server runs with ``AP2_REQUIRE_MANDATE=false``, the body must
+        carry a signed cart mandate for this exact cart. The mandate is
+        verified and consumed (single use) before the order is created.
+        """
+        mandate = req.cart_mandate if req else None
+        authorized = False
+        completed = False
         try:
+            # Reject carts that cannot be completed *before* asking for or
+            # consuming a payment authorisation.
+            session = checkout_manager.assert_ready_for_completion(session_id)
+
+            if settings.ap2_require_mandate:
+                if mandate is None:
+                    raise HTTPException(
+                        status_code=402,
+                        detail={
+                            "error": "payment_mandate_required",
+                            "errors": ["A signed cart_mandate is required to complete checkout"],
+                        },
+                    )
+                try:
+                    mandate_verifier.authorize_checkout(session, mandate)
+                except MandateRejected as exc:
+                    raise HTTPException(
+                        status_code=exc.status_code,
+                        detail={"error": "payment_mandate_rejected", "errors": exc.errors},
+                    ) from exc
+                authorized = True
+
             session = checkout_manager.complete_session(session_id)
             order = order_manager.create_order(session)
             # Update the session's order_id to match
             session.order_id = order.id
+            completed = True
             return {
                 "session": session.model_dump(mode="json"),
                 "order": order.model_dump(mode="json"),
@@ -321,6 +394,10 @@ def create_app(settings: UCPMerchantSettings | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except (InvalidTransitionError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        finally:
+            # If checkout failed after the mandate was consumed, let the agent retry.
+            if authorized and not completed and mandate is not None:
+                mandate_verifier.release_authorization(mandate)
 
     @app.post("/api/v1/checkout/{session_id}/abandon", tags=["checkout"])
     async def abandon_checkout(session_id: str) -> dict[str, Any]:
@@ -369,9 +446,27 @@ def create_app(settings: UCPMerchantSettings | None = None) -> FastAPI:
     # PAYMENTS (AP2)
     # ======================================================================
 
-    @app.post("/api/v1/payments/keys", tags=["payments"])
+    @app.post("/api/v1/payments/keys/register", tags=["payments"])
+    async def register_public_key(req: RegisterKeyRequest) -> dict[str, Any]:
+        """Register an agent's ECDSA P-256 *public* key (JWK).
+
+        The returned ``key_id`` (the JWK thumbprint) goes into the ``key_id``
+        field of every mandate the agent signs with the matching private key.
+        Registering the same key again returns the same ``key_id``.
+        """
+        try:
+            info = key_manager.register_public_key(req.jwk)
+        except InvalidKeyError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return info.model_dump(mode="json")
+
+    @app.post(
+        "/api/v1/payments/keys",
+        tags=["payments"],
+        dependencies=[Depends(require_demo_mode)],
+    )
     async def generate_key_pair() -> dict[str, Any]:
-        """Generate a new ECDSA P-256 key pair for mandate signing."""
+        """Demo only: generate a key pair, keeping the private key on the server."""
         info = key_manager.generate_key_pair()
         return info.model_dump(mode="json")
 
@@ -395,14 +490,21 @@ def create_app(settings: UCPMerchantSettings | None = None) -> FastAPI:
         except KeyError:
             raise HTTPException(
                 status_code=404, detail=f"Key not found: {key_id}"
-            )
+            ) from None
 
     @app.post("/api/v1/payments/verify/cart", tags=["payments"])
     async def verify_cart_mandate(req: VerifyCartMandateRequest) -> dict[str, Any]:
-        """Verify an AP2 cart-level payment mandate."""
+        """Verify an AP2 cart-level payment mandate (does not consume it)."""
+        session = None
+        if req.session_id is not None:
+            try:
+                session = checkout_manager.get_session(req.session_id)
+            except SessionNotFoundError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
         result = mandate_verifier.verify_cart_mandate(
             mandate=req.mandate,
             expected_total=req.expected_total,
+            session=session,
         )
         return result.model_dump(mode="json")
 
@@ -418,7 +520,11 @@ def create_app(settings: UCPMerchantSettings | None = None) -> FastAPI:
         )
         return result.model_dump(mode="json")
 
-    @app.post("/api/v1/payments/test-mandate", tags=["payments"])
+    @app.post(
+        "/api/v1/payments/test-mandate",
+        tags=["payments"],
+        dependencies=[Depends(require_demo_mode)],
+    )
     async def create_test_mandate(
         req: CreateTestMandateRequest,
     ) -> dict[str, Any]:
@@ -434,9 +540,13 @@ def create_app(settings: UCPMerchantSettings | None = None) -> FastAPI:
         except KeyError:
             raise HTTPException(
                 status_code=404, detail=f"Key not found: {req.key_id}"
-            )
+            ) from None
 
-    @app.post("/api/v1/payments/test-intent-mandate", tags=["payments"])
+    @app.post(
+        "/api/v1/payments/test-intent-mandate",
+        tags=["payments"],
+        dependencies=[Depends(require_demo_mode)],
+    )
     async def create_test_intent_mandate(
         req: CreateTestIntentMandateRequest,
     ) -> dict[str, Any]:
@@ -453,7 +563,7 @@ def create_app(settings: UCPMerchantSettings | None = None) -> FastAPI:
         except KeyError:
             raise HTTPException(
                 status_code=404, detail=f"Key not found: {req.key_id}"
-            )
+            ) from None
 
     # ======================================================================
     # ORDERS

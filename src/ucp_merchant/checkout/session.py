@@ -210,6 +210,28 @@ class CheckoutSessionManager:
         )
         return session
 
+    def assert_ready_for_completion(self, session_id: str) -> CheckoutSession:
+        """Return the session if it can be completed, without changing its state.
+
+        Lets callers (e.g. payment authorisation) check readiness *before*
+        doing anything irreversible.
+
+        Raises
+        ------
+        SessionNotFoundError
+            If the session does not exist.
+        InvalidTransitionError
+            If the session is not ready for completion.
+        """
+        from ucp_merchant.checkout.state_machine import InvalidTransitionError
+
+        session = self.get_session(session_id)
+        if session.state != CheckoutState.READY_FOR_COMPLETE:
+            evaluated = self._state_machine.evaluate_readiness(session)
+            if evaluated != CheckoutState.READY_FOR_COMPLETE:
+                raise InvalidTransitionError(session.state, CheckoutState.COMPLETED)
+        return session
+
     def complete_session(self, session_id: str) -> CheckoutSession:
         """Attempt to complete a checkout session.
 
@@ -228,17 +250,10 @@ class CheckoutSessionManager:
         InvalidTransitionError
             If the session is not ready for completion.
         """
-        session = self.get_session(session_id)
+        session = self.assert_ready_for_completion(session_id)
 
-        # If the session isn't explicitly READY_FOR_COMPLETE, re-evaluate
+        # If the session isn't explicitly READY_FOR_COMPLETE, move it there
         if session.state != CheckoutState.READY_FOR_COMPLETE:
-            evaluated = self._state_machine.evaluate_readiness(session)
-            if evaluated != CheckoutState.READY_FOR_COMPLETE:
-                from ucp_merchant.checkout.state_machine import (
-                    InvalidTransitionError,
-                )
-
-                raise InvalidTransitionError(session.state, CheckoutState.COMPLETED)
             self._state_machine.transition(session, CheckoutState.READY_FOR_COMPLETE)
 
         self._state_machine.transition(session, CheckoutState.COMPLETED)

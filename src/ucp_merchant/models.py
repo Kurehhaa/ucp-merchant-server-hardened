@@ -331,10 +331,13 @@ class CartMandate(BaseModel):
     merchant_id: str
     amount: Money
     currency: str = "USD"
+    # SHA-256 digest of the cart contents the agent saw when it signed
+    # (see ``compute_cart_hash``); binds the mandate to that exact cart.
+    cart_hash: str = ""
     issued_at: datetime = Field(default_factory=datetime.utcnow)
     expires_at: datetime | None = None
-    signature: str = ""  # base64-encoded ECDSA P-256 signature
-    key_id: str = ""  # ID of the signing key
+    signature: str = ""  # base64url-encoded ECDSA P-256 signature
+    key_id: str = ""  # ID of the registered public key that verifies it
 
 
 class IntentConstraints(BaseModel):

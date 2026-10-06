@@ -110,6 +110,7 @@ def build_ucp_manifest(settings: UCPMerchantSettings) -> UCPManifest:
         "apply_discount": f"{base}/api/v1/checkout/{{session_id}}/discount",
         "payment_verify": f"{base}/api/v1/payments/verify",
         "payment_keys": f"{base}/api/v1/payments/keys",
+        "payment_key_registration": f"{base}/api/v1/payments/keys/register",
         "order_get": f"{base}/api/v1/orders/{{order_id}}",
         "order_track": f"{base}/api/v1/orders/{{order_id}}/track",
         "webhooks": f"{base}/api/v1/webhooks",

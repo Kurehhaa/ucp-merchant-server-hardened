@@ -32,7 +32,14 @@ class UCPMerchantSettings(BaseSettings):
 
     # AP2 payment mandates
     ap2_enabled: bool = True
-    ap2_mandate_ttl_seconds: int = 3600
+    ap2_mandate_ttl_seconds: int = 3600  # TTL of demo-generated mandates
+    # Reject mandates that live longer than this (issued_at -> expires_at).
+    ap2_max_mandate_ttl_seconds: int = 86400
+    # Checkout cannot be completed without a valid, unused cart mandate.
+    ap2_require_mandate: bool = True
+    # Enables the endpoints that generate keys / sign mandates server-side.
+    # They hold private keys in memory, so keep this off outside demos.
+    ap2_demo_mode: bool = False
 
     # MCP tool bindings
     mcp_enabled: bool = True

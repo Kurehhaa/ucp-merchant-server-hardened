@@ -3,6 +3,7 @@
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from tests.ap2_helpers import AgentSimulator, complete_with_mandate
 from ucp_merchant.api import create_app
 from ucp_merchant.config import UCPMerchantSettings
 
@@ -27,6 +28,24 @@ def app(settings):
 @pytest.fixture
 async def client(app):
     transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        yield c
+
+
+@pytest.fixture
+def agent(app):
+    """A shopping agent that owns its private key and signs mandates locally."""
+    return AgentSimulator(merchant_id=app.state.settings.merchant_id)
+
+
+@pytest.fixture
+async def demo_client():
+    """Client for an app with the server-side demo signing endpoints enabled."""
+    application = create_app(
+        UCPMerchantSettings(environment="testing", ap2_demo_mode=True)
+    )
+    application.state.order_manager._tracker = None
+    transport = ASGITransport(app=application)
     async with AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
 
@@ -267,7 +286,7 @@ class TestCheckout:
         data = resp.json()
         assert data["state"] == "ready_for_complete"
 
-    async def test_complete_checkout(self, client):
+    async def test_complete_checkout(self, client, agent):
         create_resp = await self._create_checkout(client)
         session_id = create_resp.json()["id"]
 
@@ -286,7 +305,7 @@ class TestCheckout:
             "shipping_option_id": "shipping_standard"
         })
 
-        resp = await client.post(f"/api/v1/checkout/{session_id}/complete")
+        resp = await complete_with_mandate(client, agent, session_id)
         assert resp.status_code == 200
         data = resp.json()
         assert "session" in data
@@ -331,8 +350,8 @@ class TestCheckout:
 
 
 class TestPayments:
-    async def test_generate_key_pair(self, client):
-        resp = await client.post("/api/v1/payments/keys")
+    async def test_generate_key_pair(self, demo_client):
+        resp = await demo_client.post("/api/v1/payments/keys")
         assert resp.status_code == 200
         data = resp.json()
         assert "key_id" in data
@@ -340,19 +359,19 @@ class TestPayments:
         assert data["algorithm"] == "ES256"
         assert data["curve"] == "P-256"
 
-    async def test_list_keys(self, client):
+    async def test_list_keys(self, demo_client):
         # Generate a key first
-        await client.post("/api/v1/payments/keys")
-        resp = await client.get("/api/v1/payments/keys")
+        await demo_client.post("/api/v1/payments/keys")
+        resp = await demo_client.get("/api/v1/payments/keys")
         assert resp.status_code == 200
         data = resp.json()
         assert "keys" in data
         assert len(data["keys"]) >= 1
 
-    async def test_get_public_key(self, client):
-        create_resp = await client.post("/api/v1/payments/keys")
+    async def test_get_public_key(self, demo_client):
+        create_resp = await demo_client.post("/api/v1/payments/keys")
         key_id = create_resp.json()["key_id"]
-        resp = await client.get(f"/api/v1/payments/keys/{key_id}")
+        resp = await demo_client.get(f"/api/v1/payments/keys/{key_id}")
         assert resp.status_code == 200
         data = resp.json()
         assert data["key_id"] == key_id
@@ -360,19 +379,19 @@ class TestPayments:
         assert data["jwk"]["kty"] == "EC"
         assert data["jwk"]["crv"] == "P-256"
 
-    async def test_verify_test_mandate(self, client):
+    async def test_verify_test_mandate(self, demo_client):
         # Generate key
-        key_resp = await client.post("/api/v1/payments/keys")
+        key_resp = await demo_client.post("/api/v1/payments/keys")
         key_id = key_resp.json()["key_id"]
 
         # Create checkout session
-        create_resp = await client.post("/api/v1/checkout", json={
+        create_resp = await demo_client.post("/api/v1/checkout", json={
             "items": [{"product_id": "laptop-001", "quantity": 1}]
         })
         session_id = create_resp.json()["id"]
 
         # Create test mandate
-        resp = await client.post("/api/v1/payments/test-mandate", json={
+        resp = await demo_client.post("/api/v1/payments/test-mandate", json={
             "session_id": session_id,
             "key_id": key_id,
         })
@@ -382,7 +401,7 @@ class TestPayments:
         assert "mandate_id" in mandate
 
         # Verify it
-        resp = await client.post("/api/v1/payments/verify/cart", json={
+        resp = await demo_client.post("/api/v1/payments/verify/cart", json={
             "mandate": mandate,
         })
         assert resp.status_code == 200
@@ -390,13 +409,13 @@ class TestPayments:
         assert result["valid"] is True
         assert result["mandate_type"] == "cart"
 
-    async def test_create_and_verify_intent_mandate(self, client):
+    async def test_create_and_verify_intent_mandate(self, demo_client):
         # Generate key
-        key_resp = await client.post("/api/v1/payments/keys")
+        key_resp = await demo_client.post("/api/v1/payments/keys")
         key_id = key_resp.json()["key_id"]
 
         # Create test intent mandate
-        resp = await client.post("/api/v1/payments/test-intent-mandate", json={
+        resp = await demo_client.post("/api/v1/payments/test-intent-mandate", json={
             "agent_id": "test-agent",
             "key_id": key_id,
             "max_amount": 500.0,
@@ -408,7 +427,7 @@ class TestPayments:
         assert mandate["mandate_type"] == "intent"
 
         # Verify it
-        resp = await client.post("/api/v1/payments/verify/intent", json={
+        resp = await demo_client.post("/api/v1/payments/verify/intent", json={
             "mandate": mandate,
             "requested_amount": 100.0,
         })
@@ -419,7 +438,7 @@ class TestPayments:
 
 
 class TestOrders:
-    async def _create_completed_checkout(self, client):
+    async def _create_completed_checkout(self, client, agent):
         """Create a completed checkout and return the response data."""
         create_resp = await client.post("/api/v1/checkout", json={
             "items": [{"product_id": "laptop-001", "quantity": 1}]
@@ -438,11 +457,11 @@ class TestOrders:
         await client.patch(f"/api/v1/checkout/{session_id}", json={
             "shipping_option_id": "shipping_standard"
         })
-        resp = await client.post(f"/api/v1/checkout/{session_id}/complete")
+        resp = await complete_with_mandate(client, agent, session_id)
         return resp.json()
 
-    async def test_get_order(self, client):
-        data = await self._create_completed_checkout(client)
+    async def test_get_order(self, client, agent):
+        data = await self._create_completed_checkout(client, agent)
         order_id = data["order"]["id"]
         resp = await client.get(f"/api/v1/orders/{order_id}")
         assert resp.status_code == 200
@@ -450,31 +469,31 @@ class TestOrders:
         assert order_data["id"] == order_id
         assert order_data["state"] == "confirmed"
 
-    async def test_list_orders(self, client):
-        await self._create_completed_checkout(client)
+    async def test_list_orders(self, client, agent):
+        await self._create_completed_checkout(client, agent)
         resp = await client.get("/api/v1/orders")
         assert resp.status_code == 200
         data = resp.json()
         assert "orders" in data
         assert data["total"] >= 1
 
-    async def test_advance_order(self, client):
-        data = await self._create_completed_checkout(client)
+    async def test_advance_order(self, client, agent):
+        data = await self._create_completed_checkout(client, agent)
         order_id = data["order"]["id"]
         # Advance from confirmed -> processing
         resp = await client.post(f"/api/v1/orders/{order_id}/advance")
         assert resp.status_code == 200
         assert resp.json()["state"] == "processing"
 
-    async def test_cancel_order(self, client):
-        data = await self._create_completed_checkout(client)
+    async def test_cancel_order(self, client, agent):
+        data = await self._create_completed_checkout(client, agent)
         order_id = data["order"]["id"]
         resp = await client.post(f"/api/v1/orders/{order_id}/cancel")
         assert resp.status_code == 200
         assert resp.json()["state"] == "cancelled"
 
-    async def test_simulate_fulfillment(self, client):
-        data = await self._create_completed_checkout(client)
+    async def test_simulate_fulfillment(self, client, agent):
+        data = await self._create_completed_checkout(client, agent)
         order_id = data["order"]["id"]
         resp = await client.post(f"/api/v1/orders/{order_id}/simulate-fulfillment")
         assert resp.status_code == 200
