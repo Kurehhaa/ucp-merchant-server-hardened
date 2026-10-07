@@ -13,18 +13,20 @@ Exposes REST endpoints for:
 
 from __future__ import annotations
 
+import hmac
 import json
+import uuid
 from typing import Any
 
 import structlog
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Security
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from common import ErrorResponse, HealthResponse
-
 from ucp_merchant.catalog.products import ProductCatalog
 from ucp_merchant.catalog.search import CatalogSearch
 from ucp_merchant.checkout.session import CheckoutSessionManager, SessionNotFoundError
@@ -45,8 +47,8 @@ from ucp_merchant.orders.lifecycle import (
 )
 from ucp_merchant.orders.tracking import OrderTracker
 from ucp_merchant.orders.webhooks import WebhookManager
-from ucp_merchant.payments.ap2_verification import MandateVerifier
-from ucp_merchant.payments.keys import KeyManager
+from ucp_merchant.payments.ap2_verification import MandateRejected, MandateVerifier
+from ucp_merchant.payments.keys import InvalidKeyError, KeyManager
 
 logger = structlog.get_logger(__name__)
 
@@ -76,11 +78,36 @@ class UpdateCheckoutRequest(BaseModel):
     discount_code: str | None = None
 
 
+class CompleteCheckoutRequest(BaseModel):
+    """Optional body for POST /api/v1/checkout/{session_id}/complete."""
+
+    cart_mandate: CartMandate | None = Field(
+        default=None,
+        description=(
+            "Signed AP2 cart mandate authorising this checkout. Required unless "
+            "the server runs with AP2_REQUIRE_MANDATE=false."
+        ),
+    )
+
+
+class RegisterKeyRequest(BaseModel):
+    """Body for POST /api/v1/payments/keys/register."""
+
+    jwk: dict[str, Any] = Field(
+        ...,
+        description="EC P-256 *public* JWK. Private key material ('d') is rejected.",
+    )
+
+
 class VerifyCartMandateRequest(BaseModel):
     """Body for POST /api/v1/payments/verify/cart."""
 
     mandate: CartMandate
     expected_total: float | None = None
+    session_id: str | None = Field(
+        default=None,
+        description="Also check the mandate against this checkout session.",
+    )
 
 
 class VerifyIntentMandateRequest(BaseModel):
@@ -146,14 +173,18 @@ def create_app(settings: UCPMerchantSettings | None = None) -> FastAPI:
         redoc_url="/redoc",
     )
 
-    # CORS
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+    # CORS: shopping agents are server-side clients, so no browser origin is
+    # allowed unless configured.  Credentials are never combined with a
+    # wildcard origin.
+    cors_origins = settings.cors_origins
+    if cors_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=cors_origins,
+            allow_credentials="*" not in cors_origins,
+            allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
+            allow_headers=["Content-Type", "X-API-Key"],
+        )
 
     # ---- Service layer wiring ----------------------------------------------
     catalog = ProductCatalog()
@@ -167,13 +198,51 @@ def create_app(settings: UCPMerchantSettings | None = None) -> FastAPI:
     webhook_manager = WebhookManager(
         timeout=settings.webhook_timeout_seconds,
         max_retries=settings.webhook_max_retries,
+        allow_private_hosts=settings.webhook_allow_private_hosts,
     )
     mcp_handler = MCPToolHandler(
         checkout_manager=checkout_manager,
         catalog_search=catalog_search,
         catalog=catalog,
         order_manager=order_manager,
+        mandate_verifier=mandate_verifier,
+        require_mandate=settings.ap2_require_mandate,
     )
+
+    admin_key_header = APIKeyHeader(
+        name="X-API-Key",
+        auto_error=False,
+        description="Merchant admin key (ADMIN_API_KEY).",
+    )
+
+    def require_admin(api_key: str | None = Security(admin_key_header)) -> None:
+        """Guard for merchant-admin endpoints (orders management, webhooks, keys)."""
+        if not settings.admin_api_key:
+            raise HTTPException(
+                status_code=403,
+                detail="Admin endpoints are disabled: set ADMIN_API_KEY to enable them.",
+            )
+        if api_key is None or not hmac.compare_digest(
+            api_key.encode(), settings.admin_api_key.encode()
+        ):
+            raise HTTPException(
+                status_code=401,
+                detail="Missing or invalid API key.",
+                headers={"WWW-Authenticate": "ApiKey"},
+            )
+
+    def require_demo_mode() -> None:
+        """Guard for endpoints that sign with server-held private keys."""
+        if not settings.ap2_demo_mode:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    "Demo signing endpoints are disabled. Agents should sign "
+                    "mandates locally and register only their public key via "
+                    "POST /api/v1/payments/keys/register "
+                    "(set AP2_DEMO_MODE=true to enable the demo endpoints)."
+                ),
+            )
 
     # Expose on app.state for testing
     app.state.settings = settings
@@ -181,6 +250,8 @@ def create_app(settings: UCPMerchantSettings | None = None) -> FastAPI:
     app.state.checkout_manager = checkout_manager
     app.state.order_manager = order_manager
     app.state.key_manager = key_manager
+    app.state.mandate_verifier = mandate_verifier
+    app.state.webhook_manager = webhook_manager
 
     # ======================================================================
     # HEALTH
@@ -279,9 +350,7 @@ def create_app(settings: UCPMerchantSettings | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.patch("/api/v1/checkout/{session_id}", tags=["checkout"])
-    async def update_checkout(
-        session_id: str, req: UpdateCheckoutRequest
-    ) -> dict[str, Any]:
+    async def update_checkout(session_id: str, req: UpdateCheckoutRequest) -> dict[str, Any]:
         """Update a checkout session (add items, set address, etc.)."""
         updates: dict[str, Any] = {}
         if req.add_items is not None:
@@ -306,13 +375,46 @@ def create_app(settings: UCPMerchantSettings | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/api/v1/checkout/{session_id}/complete", tags=["checkout"])
-    async def complete_checkout(session_id: str) -> dict[str, Any]:
-        """Complete a checkout session and create an order."""
+    async def complete_checkout(
+        session_id: str, req: CompleteCheckoutRequest | None = None
+    ) -> dict[str, Any]:
+        """Complete a checkout session and create an order.
+
+        Unless the server runs with ``AP2_REQUIRE_MANDATE=false``, the body must
+        carry a signed cart mandate for this exact cart. The mandate is
+        verified and consumed (single use) before the order is created.
+        """
+        mandate = req.cart_mandate if req else None
+        authorized = False
+        completed = False
         try:
-            session = checkout_manager.complete_session(session_id)
-            order = order_manager.create_order(session)
-            # Update the session's order_id to match
-            session.order_id = order.id
+            # Reject carts that cannot be completed *before* asking for or
+            # consuming a payment authorisation.
+            session = checkout_manager.assert_ready_for_completion(session_id)
+
+            if settings.ap2_require_mandate:
+                if mandate is None:
+                    raise HTTPException(
+                        status_code=402,
+                        detail={
+                            "error": "payment_mandate_required",
+                            "errors": ["A signed cart_mandate is required to complete checkout"],
+                        },
+                    )
+                try:
+                    mandate_verifier.authorize_checkout(session, mandate)
+                except MandateRejected as exc:
+                    raise HTTPException(
+                        status_code=exc.status_code,
+                        detail={"error": "payment_mandate_rejected", "errors": exc.errors},
+                    ) from exc
+                authorized = True
+
+            # All-or-nothing: the session only becomes COMPLETED if the order exists.
+            session, order = checkout_manager.complete_with_order(
+                session_id, order_manager.create_order
+            )
+            completed = True
             return {
                 "session": session.model_dump(mode="json"),
                 "order": order.model_dump(mode="json"),
@@ -321,6 +423,10 @@ def create_app(settings: UCPMerchantSettings | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except (InvalidTransitionError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        finally:
+            # If checkout failed after the mandate was consumed, let the agent retry.
+            if authorized and not completed and mandate is not None:
+                mandate_verifier.release_authorization(mandate)
 
     @app.post("/api/v1/checkout/{session_id}/abandon", tags=["checkout"])
     async def abandon_checkout(session_id: str) -> dict[str, Any]:
@@ -341,9 +447,7 @@ def create_app(settings: UCPMerchantSettings | None = None) -> FastAPI:
         except SessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-        options = checkout_manager.fulfillment.get_shipping_options(
-            session.subtotal.amount
-        )
+        options = checkout_manager.fulfillment.get_shipping_options(session.subtotal.amount)
         return {
             "session_id": session_id,
             "subtotal": session.subtotal.amount,
@@ -356,9 +460,7 @@ def create_app(settings: UCPMerchantSettings | None = None) -> FastAPI:
     ) -> dict[str, Any]:
         """Apply a discount code to a checkout session."""
         try:
-            session = checkout_manager.update_session(
-                session_id, {"discount_code": code}
-            )
+            session = checkout_manager.update_session(session_id, {"discount_code": code})
             return session.model_dump(mode="json")
         except SessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -369,13 +471,31 @@ def create_app(settings: UCPMerchantSettings | None = None) -> FastAPI:
     # PAYMENTS (AP2)
     # ======================================================================
 
-    @app.post("/api/v1/payments/keys", tags=["payments"])
+    @app.post("/api/v1/payments/keys/register", tags=["payments"])
+    async def register_public_key(req: RegisterKeyRequest) -> dict[str, Any]:
+        """Register an agent's ECDSA P-256 *public* key (JWK).
+
+        The returned ``key_id`` (the JWK thumbprint) goes into the ``key_id``
+        field of every mandate the agent signs with the matching private key.
+        Registering the same key again returns the same ``key_id``.
+        """
+        try:
+            info = key_manager.register_public_key(req.jwk)
+        except InvalidKeyError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return info.model_dump(mode="json")
+
+    @app.post(
+        "/api/v1/payments/keys",
+        tags=["payments"],
+        dependencies=[Depends(require_demo_mode)],
+    )
     async def generate_key_pair() -> dict[str, Any]:
-        """Generate a new ECDSA P-256 key pair for mandate signing."""
+        """Demo only: generate a key pair, keeping the private key on the server."""
         info = key_manager.generate_key_pair()
         return info.model_dump(mode="json")
 
-    @app.get("/api/v1/payments/keys", tags=["payments"])
+    @app.get("/api/v1/payments/keys", tags=["payments"], dependencies=[Depends(require_admin)])
     async def list_keys() -> dict[str, Any]:
         """List all generated key pairs."""
         keys = key_manager.list_keys()
@@ -393,16 +513,21 @@ def create_app(settings: UCPMerchantSettings | None = None) -> FastAPI:
                 "info": info.model_dump(mode="json"),
             }
         except KeyError:
-            raise HTTPException(
-                status_code=404, detail=f"Key not found: {key_id}"
-            )
+            raise HTTPException(status_code=404, detail=f"Key not found: {key_id}") from None
 
     @app.post("/api/v1/payments/verify/cart", tags=["payments"])
     async def verify_cart_mandate(req: VerifyCartMandateRequest) -> dict[str, Any]:
-        """Verify an AP2 cart-level payment mandate."""
+        """Verify an AP2 cart-level payment mandate (does not consume it)."""
+        session = None
+        if req.session_id is not None:
+            try:
+                session = checkout_manager.get_session(req.session_id)
+            except SessionNotFoundError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
         result = mandate_verifier.verify_cart_mandate(
             mandate=req.mandate,
             expected_total=req.expected_total,
+            session=session,
         )
         return result.model_dump(mode="json")
 
@@ -418,7 +543,11 @@ def create_app(settings: UCPMerchantSettings | None = None) -> FastAPI:
         )
         return result.model_dump(mode="json")
 
-    @app.post("/api/v1/payments/test-mandate", tags=["payments"])
+    @app.post(
+        "/api/v1/payments/test-mandate",
+        tags=["payments"],
+        dependencies=[Depends(require_demo_mode)],
+    )
     async def create_test_mandate(
         req: CreateTestMandateRequest,
     ) -> dict[str, Any]:
@@ -432,11 +561,13 @@ def create_app(settings: UCPMerchantSettings | None = None) -> FastAPI:
             mandate = mandate_verifier.create_test_mandate(session, req.key_id)
             return mandate.model_dump(mode="json")
         except KeyError:
-            raise HTTPException(
-                status_code=404, detail=f"Key not found: {req.key_id}"
-            )
+            raise HTTPException(status_code=404, detail=f"Key not found: {req.key_id}") from None
 
-    @app.post("/api/v1/payments/test-intent-mandate", tags=["payments"])
+    @app.post(
+        "/api/v1/payments/test-intent-mandate",
+        tags=["payments"],
+        dependencies=[Depends(require_demo_mode)],
+    )
     async def create_test_intent_mandate(
         req: CreateTestIntentMandateRequest,
     ) -> dict[str, Any]:
@@ -451,15 +582,13 @@ def create_app(settings: UCPMerchantSettings | None = None) -> FastAPI:
             )
             return mandate.model_dump(mode="json")
         except KeyError:
-            raise HTTPException(
-                status_code=404, detail=f"Key not found: {req.key_id}"
-            )
+            raise HTTPException(status_code=404, detail=f"Key not found: {req.key_id}") from None
 
     # ======================================================================
     # ORDERS
     # ======================================================================
 
-    @app.get("/api/v1/orders", tags=["orders"])
+    @app.get("/api/v1/orders", tags=["orders"], dependencies=[Depends(require_admin)])
     async def list_orders() -> dict[str, Any]:
         """List all orders."""
         orders = order_manager.list_orders()
@@ -477,7 +606,9 @@ def create_app(settings: UCPMerchantSettings | None = None) -> FastAPI:
         except OrderNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    @app.post("/api/v1/orders/{order_id}/advance", tags=["orders"])
+    @app.post(
+        "/api/v1/orders/{order_id}/advance", tags=["orders"], dependencies=[Depends(require_admin)]
+    )
     async def advance_order(order_id: str) -> dict[str, Any]:
         """Advance the order to the next state."""
         try:
@@ -488,7 +619,9 @@ def create_app(settings: UCPMerchantSettings | None = None) -> FastAPI:
         except InvalidOrderStateError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    @app.post("/api/v1/orders/{order_id}/cancel", tags=["orders"])
+    @app.post(
+        "/api/v1/orders/{order_id}/cancel", tags=["orders"], dependencies=[Depends(require_admin)]
+    )
     async def cancel_order(order_id: str) -> dict[str, Any]:
         """Cancel an order."""
         try:
@@ -499,7 +632,11 @@ def create_app(settings: UCPMerchantSettings | None = None) -> FastAPI:
         except InvalidOrderStateError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    @app.post("/api/v1/orders/{order_id}/simulate-fulfillment", tags=["orders"])
+    @app.post(
+        "/api/v1/orders/{order_id}/simulate-fulfillment",
+        tags=["orders"],
+        dependencies=[Depends(require_admin)],
+    )
     async def simulate_fulfillment(order_id: str) -> dict[str, Any]:
         """Fast-forward an order to SHIPPED state with tracking info."""
         try:
@@ -532,18 +669,16 @@ def create_app(settings: UCPMerchantSettings | None = None) -> FastAPI:
     # WEBHOOKS
     # ======================================================================
 
-    @app.post("/api/v1/webhooks", tags=["webhooks"])
+    @app.post("/api/v1/webhooks", tags=["webhooks"], dependencies=[Depends(require_admin)])
     async def register_webhook(req: RegisterWebhookRequest) -> dict[str, Any]:
         """Register a webhook endpoint for order events."""
         try:
-            registration = webhook_manager.register_webhook(
-                url=req.url, events=req.events
-            )
+            registration = webhook_manager.register_webhook(url=req.url, events=req.events)
             return registration.model_dump(mode="json")
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    @app.get("/api/v1/webhooks", tags=["webhooks"])
+    @app.get("/api/v1/webhooks", tags=["webhooks"], dependencies=[Depends(require_admin)])
     async def list_webhooks() -> dict[str, Any]:
         """List all registered webhooks."""
         webhooks = webhook_manager.list_webhooks()
@@ -566,9 +701,7 @@ def create_app(settings: UCPMerchantSettings | None = None) -> FastAPI:
         }
 
     @app.post("/api/v1/mcp/tools/{tool_name}/execute", tags=["mcp"])
-    async def execute_mcp_tool(
-        tool_name: str, req: MCPExecuteRequest
-    ) -> dict[str, Any]:
+    async def execute_mcp_tool(tool_name: str, req: MCPExecuteRequest) -> dict[str, Any]:
         """Execute an MCP tool by name."""
         result = await mcp_handler.execute(tool_name, req.arguments)
         return result.model_dump(mode="json")
@@ -578,21 +711,26 @@ def create_app(settings: UCPMerchantSettings | None = None) -> FastAPI:
     # ======================================================================
 
     @app.exception_handler(Exception)
-    async def generic_exception_handler(
-        request: Request, exc: Exception
-    ) -> JSONResponse:
-        """Catch-all error handler returning a structured error response."""
+    async def generic_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+        """Catch-all: log the details, return only a reference to the client."""
+        error_id = uuid.uuid4().hex[:12]
         logger.error(
             "unhandled_exception",
+            error_id=error_id,
             error=str(exc),
             path=request.url.path,
             exc_info=True,
+        )
+        detail = (
+            str(exc)
+            if settings.expose_error_details
+            else f"An unexpected error occurred (reference: {error_id})."
         )
         return JSONResponse(
             status_code=500,
             content=ErrorResponse(
                 error="Internal server error",
-                detail=str(exc),
+                detail=detail,
                 status_code=500,
             ).model_dump(),
         )

@@ -12,6 +12,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from ucp_merchant.utils import utcnow
 
 # ---------------------------------------------------------------------------
 # Common value objects
@@ -67,7 +68,7 @@ class Product(BaseModel):
     specs: dict[str, str] = Field(default_factory=dict)
     rating: float = 0.0
     review_count: int = 0
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utcnow)
 
 
 class SearchResult(BaseModel):
@@ -163,12 +164,14 @@ class CheckoutSession(BaseModel):
     total: Money = Field(default_factory=lambda: Money(amount=0.0))
 
     # Metadata
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
     completed_at: datetime | None = None
     order_id: str | None = None
 
-    # Escalation tracking
+    # Why the session is not ready: data the agent can still supply ...
+    missing_fields: list[str] = Field(default_factory=list)
+    # ... and problems only a human buyer can resolve.
     escalation_reasons: list[str] = Field(default_factory=list)
 
 
@@ -192,7 +195,7 @@ class OrderStatusEvent(BaseModel):
 
     event_type: str
     message: str
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=utcnow)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -222,8 +225,8 @@ class Order(BaseModel):
     history: list[OrderStatusEvent] = Field(default_factory=list)
 
     # Timestamps
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
     shipped_at: datetime | None = None
     delivered_at: datetime | None = None
     cancelled_at: datetime | None = None
@@ -331,10 +334,13 @@ class CartMandate(BaseModel):
     merchant_id: str
     amount: Money
     currency: str = "USD"
-    issued_at: datetime = Field(default_factory=datetime.utcnow)
+    # SHA-256 digest of the cart contents the agent saw when it signed
+    # (see ``compute_cart_hash``); binds the mandate to that exact cart.
+    cart_hash: str = ""
+    issued_at: datetime = Field(default_factory=utcnow)
     expires_at: datetime | None = None
-    signature: str = ""  # base64-encoded ECDSA P-256 signature
-    key_id: str = ""  # ID of the signing key
+    signature: str = ""  # base64url-encoded ECDSA P-256 signature
+    key_id: str = ""  # ID of the registered public key that verifies it
 
 
 class IntentConstraints(BaseModel):
@@ -356,7 +362,7 @@ class IntentMandate(BaseModel):
     mandate_type: MandateType = MandateType.INTENT
     agent_id: str
     constraints: IntentConstraints
-    issued_at: datetime = Field(default_factory=datetime.utcnow)
+    issued_at: datetime = Field(default_factory=utcnow)
     expires_at: datetime | None = None
     signature: str = ""
     key_id: str = ""
@@ -370,7 +376,7 @@ class MandateVerificationResult(BaseModel):
     mandate_type: MandateType
     errors: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
-    verified_at: datetime = Field(default_factory=datetime.utcnow)
+    verified_at: datetime = Field(default_factory=utcnow)
 
 
 class KeyPairInfo(BaseModel):
@@ -379,7 +385,7 @@ class KeyPairInfo(BaseModel):
     key_id: str
     algorithm: str = "ES256"
     curve: str = "P-256"
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utcnow)
     public_key_jwk: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -394,7 +400,7 @@ class WebhookRegistration(BaseModel):
     id: str
     url: str
     events: list[str]
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utcnow)
     active: bool = True
 
 
@@ -405,7 +411,7 @@ class WebhookPayload(BaseModel):
     event_type: str
     order_id: str
     payload: dict[str, Any]
-    delivered_at: datetime = Field(default_factory=datetime.utcnow)
+    delivered_at: datetime = Field(default_factory=utcnow)
 
 
 # ---------------------------------------------------------------------------
@@ -418,7 +424,7 @@ class MCPToolDefinition(BaseModel):
 
     name: str
     description: str
-    inputSchema: dict[str, Any]  # noqa: N815 -- matches MCP spec field name
+    inputSchema: dict[str, Any]
 
 
 class MCPToolResult(BaseModel):

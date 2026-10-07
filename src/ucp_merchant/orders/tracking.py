@@ -7,8 +7,9 @@ real-time order status updates delivered as SSE streams.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections import defaultdict
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
 
 import structlog
 
@@ -26,8 +27,8 @@ class OrderTracker:
 
     def __init__(self) -> None:
         # order_id -> list of asyncio.Queue instances for active subscribers
-        self._subscribers: dict[str, list[asyncio.Queue[OrderStatusEvent | None]]] = (
-            defaultdict(list)
+        self._subscribers: dict[str, list[asyncio.Queue[OrderStatusEvent | None]]] = defaultdict(
+            list
         )
 
     def notify_update(self, order_id: str, event: OrderStatusEvent) -> None:
@@ -51,13 +52,13 @@ class OrderTracker:
                 logger.warning(
                     "subscriber_queue_full",
                     order_id=order_id,
-                    event=event.event_type,
+                    event_type=event.event_type,
                 )
 
         logger.debug(
             "event_broadcast",
             order_id=order_id,
-            event=event.event_type,
+            event_type=event.event_type,
             subscribers=len(queues),
         )
 
@@ -92,7 +93,7 @@ class OrderTracker:
             while True:
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=timeout)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     logger.info(
                         "subscriber_timeout",
                         order_id=order_id,
@@ -119,16 +120,10 @@ class OrderTracker:
         """Send a sentinel to all subscribers for *order_id*, closing their streams."""
         queues = self._subscribers.get(order_id, [])
         for queue in queues:
-            try:
+            with contextlib.suppress(asyncio.QueueFull):
                 queue.put_nowait(None)
-            except asyncio.QueueFull:
-                pass
 
     @property
     def active_subscriptions(self) -> dict[str, int]:
         """Return a snapshot of active subscriber counts per order."""
-        return {
-            order_id: len(queues)
-            for order_id, queues in self._subscribers.items()
-            if queues
-        }
+        return {order_id: len(queues) for order_id, queues in self._subscribers.items() if queues}

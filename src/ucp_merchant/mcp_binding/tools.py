@@ -11,7 +11,12 @@ from typing import Any
 
 import structlog
 
+from ucp_merchant.catalog.products import ProductCatalog
+from ucp_merchant.catalog.search import CatalogSearch
+from ucp_merchant.checkout.session import CheckoutSessionManager
 from ucp_merchant.models import MCPToolDefinition, MCPToolResult
+from ucp_merchant.orders.lifecycle import OrderManager
+from ucp_merchant.payments.ap2_verification import MandateVerifier
 
 logger = structlog.get_logger(__name__)
 
@@ -223,7 +228,9 @@ TOOL_DEFINITIONS: list[MCPToolDefinition] = [
         name="complete_checkout",
         description=(
             "Complete a checkout session and create an order. "
-            "The session must have items, a shipping address, and a shipping method selected."
+            "The session must have items, a shipping address, and a shipping method selected. "
+            "Unless the merchant disabled it, a signed AP2 cart mandate for this exact cart "
+            "is required; each mandate can be used once."
         ),
         inputSchema={
             "type": "object",
@@ -231,6 +238,10 @@ TOOL_DEFINITIONS: list[MCPToolDefinition] = [
                 "session_id": {
                     "type": "string",
                     "description": "The checkout session ID to complete.",
+                },
+                "cart_mandate": {
+                    "type": "object",
+                    "description": "Signed AP2 cart mandate authorising this checkout.",
                 },
             },
             "required": ["session_id"],
@@ -271,19 +282,30 @@ class MCPToolHandler:
         The :class:`ProductCatalog` instance.
     order_manager:
         The :class:`OrderManager` instance.
+    mandate_verifier:
+        The :class:`MandateVerifier` used to authorise checkout completion.
+    require_mandate:
+        Whether ``complete_checkout`` needs a valid cart mandate.  Must match
+        the REST API's policy so the MCP surface is not a way around it.
     """
 
     def __init__(
         self,
-        checkout_manager: Any,
-        catalog_search: Any,
-        catalog: Any,
-        order_manager: Any,
+        checkout_manager: CheckoutSessionManager,
+        catalog_search: CatalogSearch,
+        catalog: ProductCatalog,
+        order_manager: OrderManager,
+        mandate_verifier: MandateVerifier | None = None,
+        require_mandate: bool = False,
     ) -> None:
+        if require_mandate and mandate_verifier is None:
+            raise ValueError("require_mandate=True needs a mandate_verifier")
         self._checkout = checkout_manager
         self._search = catalog_search
         self._catalog = catalog
         self._orders = order_manager
+        self._verifier = mandate_verifier
+        self._require_mandate = require_mandate
 
     def get_tool_definitions(self) -> list[MCPToolDefinition]:
         """Return all available MCP tool definitions."""
@@ -366,9 +388,7 @@ class MCPToolHandler:
         return product.model_dump(mode="json")
 
     def _create_checkout(self, args: dict[str, Any]) -> dict[str, Any]:
-        session = self._checkout.create_session(
-            line_items=args.get("items", [])
-        )
+        session = self._checkout.create_session(line_items=args.get("items", []))
         return session.model_dump(mode="json")
 
     def _update_checkout(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -391,9 +411,36 @@ class MCPToolHandler:
         return session.model_dump(mode="json")
 
     def _complete_checkout(self, args: dict[str, Any]) -> dict[str, Any]:
-        session = self._checkout.complete_session(args["session_id"])
-        # Also create the order
-        order = self._orders.create_order(session)
+        from ucp_merchant.models import CartMandate
+
+        session_id = args["session_id"]
+        # Check the cart can be completed before touching the mandate.
+        session = self._checkout.assert_ready_for_completion(session_id)
+
+        mandate = None
+        verifier = self._verifier
+        if self._require_mandate:
+            if verifier is None:  # guarded in __init__; keeps the type checker honest
+                raise RuntimeError("Mandate verification is required but not configured")
+            raw_mandate = args.get("cart_mandate")
+            if raw_mandate is None:
+                raise ValueError(
+                    "cart_mandate is required: a signed AP2 cart mandate for this checkout"
+                )
+            mandate = CartMandate.model_validate(raw_mandate)
+            # Raises MandateRejected (a ValueError) -> reported as a tool error.
+            verifier.authorize_checkout(session, mandate)
+
+        completed = False
+        try:
+            # All-or-nothing: the session only becomes COMPLETED if the order exists.
+            session, order = self._checkout.complete_with_order(
+                session_id, self._orders.create_order
+            )
+            completed = True
+        finally:
+            if mandate is not None and verifier is not None and not completed:
+                verifier.release_authorization(mandate)
         return {
             "session": session.model_dump(mode="json"),
             "order": order.model_dump(mode="json"),

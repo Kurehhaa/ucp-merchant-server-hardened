@@ -35,10 +35,7 @@ class ProductCatalog:
         counts: dict[str, int] = {}
         for p in self._products.values():
             counts[p.category.value] = counts.get(p.category.value, 0) + 1
-        return [
-            {"name": cat.value, "count": counts.get(cat.value, 0)}
-            for cat in ProductCategory
-        ]
+        return [{"name": cat.value, "count": counts.get(cat.value, 0)} for cat in ProductCategory]
 
     def update_stock(self, product_id: str, quantity_delta: int) -> bool:
         """Adjust stock for *product_id*.  Returns ``False`` if insufficient."""
@@ -53,7 +50,7 @@ class ProductCatalog:
 
     # -- seed data -----------------------------------------------------------
 
-    def _seed(self) -> None:  # noqa: C901 (seed data is intentionally long)
+    def _seed(self) -> None:
         """Populate the catalog with 30 products."""
         products = [
             # ---- LAPTOPS (6) ------------------------------------------------

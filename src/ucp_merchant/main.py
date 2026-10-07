@@ -9,7 +9,6 @@ from __future__ import annotations
 import uvicorn
 
 from common import setup_logging
-
 from ucp_merchant.api import create_app
 from ucp_merchant.config import get_settings
 

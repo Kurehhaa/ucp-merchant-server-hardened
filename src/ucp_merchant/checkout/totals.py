@@ -34,8 +34,7 @@ class TotalsCalculator:
 
         # 1. Subtotal
         subtotal = sum(
-            (item.total_price.amount if item.total_price else 0.0)
-            for item in session.line_items
+            (item.total_price.amount if item.total_price else 0.0) for item in session.line_items
         )
         subtotal = round(subtotal, 2)
         session.subtotal = Money(amount=subtotal, currency=currency)
@@ -45,9 +44,7 @@ class TotalsCalculator:
         free_shipping = False
         if session.applied_discount:
             disc = session.applied_discount
-            if disc.discount_type == "percentage":
-                discount_amount = disc.discount_amount
-            elif disc.discount_type == "fixed":
+            if disc.discount_type == "percentage" or disc.discount_type == "fixed":
                 discount_amount = disc.discount_amount
             elif disc.discount_type == "free_shipping":
                 free_shipping = True

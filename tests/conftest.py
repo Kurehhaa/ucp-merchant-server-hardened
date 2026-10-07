@@ -2,8 +2,8 @@
 
 import pytest
 
-from ucp_merchant.config import UCPMerchantSettings
 from ucp_merchant.api import create_app
+from ucp_merchant.config import UCPMerchantSettings
 
 
 @pytest.fixture

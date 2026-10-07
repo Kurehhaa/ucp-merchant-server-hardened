@@ -7,7 +7,7 @@ to manage the full checkout lifecycle from creation to completion.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from collections.abc import Callable
 from typing import Any
 
 import structlog
@@ -23,6 +23,7 @@ from ucp_merchant.models import (
     CheckoutState,
     LineItem,
     Money,
+    Order,
 )
 
 logger = structlog.get_logger(__name__)
@@ -158,9 +159,7 @@ class CheckoutSessionManager:
         session = self.get_session(session_id)
 
         if session.state in (CheckoutState.COMPLETED, CheckoutState.ABANDONED):
-            raise ValueError(
-                f"Cannot update session in terminal state: {session.state.value!r}"
-            )
+            raise ValueError(f"Cannot update session in terminal state: {session.state.value!r}")
 
         # Add items
         for item_spec in updates.get("add_items", []):
@@ -172,9 +171,7 @@ class CheckoutSessionManager:
 
         # Remove items
         for product_id in updates.get("remove_items", []):
-            session.line_items = [
-                li for li in session.line_items if li.product_id != product_id
-            ]
+            session.line_items = [li for li in session.line_items if li.product_id != product_id]
 
         # Shipping address
         if "shipping_address" in updates:
@@ -189,15 +186,11 @@ class CheckoutSessionManager:
 
         # Shipping option
         if "shipping_option_id" in updates:
-            session = self._fulfillment.apply_shipping(
-                session, updates["shipping_option_id"]
-            )
+            session = self._fulfillment.apply_shipping(session, updates["shipping_option_id"])
 
         # Discount code
         if "discount_code" in updates:
-            session = self._discounts.apply_discount(
-                session, updates["discount_code"]
-            )
+            session = self._discounts.apply_discount(session, updates["discount_code"])
 
         session = self._recalculate(session)
         self._sessions[session_id] = session
@@ -208,6 +201,32 @@ class CheckoutSessionManager:
             state=session.state.value,
             total=session.total.amount,
         )
+        return session
+
+    def assert_ready_for_completion(self, session_id: str) -> CheckoutSession:
+        """Return the session if it can be completed, without changing its state.
+
+        Lets callers (e.g. payment authorisation) check readiness *before*
+        doing anything irreversible.
+
+        Raises
+        ------
+        SessionNotFoundError
+            If the session does not exist.
+        InvalidTransitionError
+            If the session is not ready for completion.
+        """
+        from ucp_merchant.checkout.state_machine import InvalidTransitionError
+
+        session = self.get_session(session_id)
+
+        # Never trust the stored state: stock or contents may have changed
+        # since the last update, so evaluate the cart as it is right now.
+        if session.state in (CheckoutState.COMPLETED, CheckoutState.ABANDONED):
+            raise InvalidTransitionError(session.state, CheckoutState.COMPLETED)
+        session = self._recalculate(session)
+        if session.state != CheckoutState.READY_FOR_COMPLETE:
+            raise InvalidTransitionError(session.state, CheckoutState.COMPLETED)
         return session
 
     def complete_session(self, session_id: str) -> CheckoutSession:
@@ -228,18 +247,7 @@ class CheckoutSessionManager:
         InvalidTransitionError
             If the session is not ready for completion.
         """
-        session = self.get_session(session_id)
-
-        # If the session isn't explicitly READY_FOR_COMPLETE, re-evaluate
-        if session.state != CheckoutState.READY_FOR_COMPLETE:
-            evaluated = self._state_machine.evaluate_readiness(session)
-            if evaluated != CheckoutState.READY_FOR_COMPLETE:
-                from ucp_merchant.checkout.state_machine import (
-                    InvalidTransitionError,
-                )
-
-                raise InvalidTransitionError(session.state, CheckoutState.COMPLETED)
-            self._state_machine.transition(session, CheckoutState.READY_FOR_COMPLETE)
+        session = self.assert_ready_for_completion(session_id)
 
         self._state_machine.transition(session, CheckoutState.COMPLETED)
 
@@ -317,20 +325,62 @@ class CheckoutSessionManager:
         session.line_items.append(line_item)
         return session
 
+    def complete_with_order(
+        self,
+        session_id: str,
+        create_order: Callable[[CheckoutSession], Order],
+    ) -> tuple[CheckoutSession, Order]:
+        """Complete a session and create its order as one all-or-nothing step.
+
+        The session is only marked COMPLETED if *create_order* succeeds.  If it
+        raises, the stored session is left exactly as it was (still ready), so
+        the checkout can be retried instead of ending up completed without an
+        order.
+
+        Returns
+        -------
+        tuple[CheckoutSession, Order]
+
+        Raises
+        ------
+        SessionNotFoundError
+        InvalidTransitionError
+            If the session is not ready for completion.
+        """
+        current = self.assert_ready_for_completion(session_id)
+
+        # Work on a copy: nothing is committed until the order exists.
+        completed = current.model_copy(deep=True)
+        self._state_machine.transition(completed, CheckoutState.COMPLETED)
+        completed.order_id = f"ord_{uuid.uuid4().hex[:16]}"
+
+        order = create_order(completed)
+        completed.order_id = order.id
+
+        self._sessions[session_id] = completed
+        logger.info(
+            "checkout_session_completed",
+            session_id=session_id,
+            order_id=order.id,
+            total=completed.total.amount,
+        )
+        return completed, order
+
     def _recalculate(self, session: CheckoutSession) -> CheckoutSession:
-        """Recalculate totals and re-evaluate state."""
+        """Recalculate totals, then refresh missing fields and state."""
         session = self._totals.calculate(session)
-        evaluated_state = self._state_machine.evaluate_readiness(session)
-        if evaluated_state != session.state:
-            try:
-                self._state_machine.transition(session, evaluated_state)
-            except Exception:
-                # If the transition isn't valid from the current state,
-                # log and leave the state as-is.
-                logger.debug(
-                    "state_evaluation_skipped",
-                    session_id=session.id,
-                    current=session.state.value,
-                    evaluated=evaluated_state.value,
+        return self._state_machine.sync(session, self._escalation_reasons(session))
+
+    def _escalation_reasons(self, session: CheckoutSession) -> list[str]:
+        """Problems only a human buyer can resolve (currently: stock shortfalls)."""
+        reasons: list[str] = []
+        for item in session.line_items:
+            product = self._catalog.get(item.product_id)
+            if product is None:
+                reasons.append(f"{item.product_name!r} is no longer in the catalog")
+            elif product.stock < item.quantity:
+                reasons.append(
+                    f"Only {product.stock} of {item.product_name!r} available "
+                    f"(cart has {item.quantity})"
                 )
-        return session
+        return reasons

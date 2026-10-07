@@ -54,12 +54,8 @@ class NegotiationEngine:
         """
         negotiation_id = f"neg_{uuid.uuid4().hex[:12]}"
 
-        agreed_capabilities = self._intersect_capabilities(
-            request.requested_capabilities
-        )
-        agreed_extensions = self._intersect_extensions(
-            request.requested_extensions
-        )
+        agreed_capabilities = self._intersect_capabilities(request.requested_capabilities)
+        agreed_extensions = self._intersect_extensions(request.requested_extensions)
         agreed_payment_handlers = self._intersect_payment_handlers(
             request.supported_payment_handlers
         )
@@ -78,9 +74,7 @@ class NegotiationEngine:
             agreed_capabilities=agreed_capabilities,
             agreed_extensions=agreed_extensions,
             agreed_payment_handlers=agreed_payment_handlers,
-            session_endpoint=(
-                f"{self._settings.ucp_base_url}/api/v1/checkout"
-            ),
+            session_endpoint=(f"{self._settings.ucp_base_url}/api/v1/checkout"),
             metadata={
                 "merchant_name": self._settings.merchant_name,
                 "spec_version": self._settings.ucp_spec_version,
@@ -100,35 +94,17 @@ class NegotiationEngine:
 
     # -- private helpers -----------------------------------------------------
 
-    def _intersect_capabilities(
-        self, requested: list[str]
-    ) -> list[UCPCapability]:
+    def _intersect_capabilities(self, requested: list[str]) -> list[UCPCapability]:
         """Return merchant capabilities whose IDs appear in *requested*."""
         requested_set = set(requested)
-        return [
-            cap
-            for cap in self._manifest.capabilities
-            if cap.id in requested_set
-        ]
+        return [cap for cap in self._manifest.capabilities if cap.id in requested_set]
 
-    def _intersect_extensions(
-        self, requested: list[str]
-    ) -> list[UCPExtension]:
+    def _intersect_extensions(self, requested: list[str]) -> list[UCPExtension]:
         """Return merchant extensions whose IDs appear in *requested*."""
         requested_set = set(requested)
-        return [
-            ext
-            for ext in self._manifest.extensions
-            if ext.id in requested_set
-        ]
+        return [ext for ext in self._manifest.extensions if ext.id in requested_set]
 
-    def _intersect_payment_handlers(
-        self, requested: list[str]
-    ) -> list[UCPPaymentHandler]:
+    def _intersect_payment_handlers(self, requested: list[str]) -> list[UCPPaymentHandler]:
         """Return merchant payment handlers whose IDs appear in *requested*."""
         requested_set = set(requested)
-        return [
-            ph
-            for ph in self._manifest.payment_handlers
-            if ph.id in requested_set
-        ]
+        return [ph for ph in self._manifest.payment_handlers if ph.id in requested_set]

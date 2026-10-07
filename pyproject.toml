@@ -32,7 +32,16 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "W", "F", "I", "B", "C4", "UP", "SIM", "TCH", "RUF"]
-ignore = ["E501"]
+ignore = [
+    "E501",
+    # Pydantic models and FastAPI handlers resolve annotations at runtime, so
+    # "typing-only" imports must stay regular imports.
+    "TC001",
+    "TC002",
+    "TC003",
+    # Keep (str, Enum): StrEnum would change str()/format() of the state enums.
+    "UP042",
+]
 
 [tool.ruff.lint.isort]
 known-first-party = ["ucp_merchant"]
