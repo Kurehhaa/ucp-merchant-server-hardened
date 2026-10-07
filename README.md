@@ -1,6 +1,6 @@
 # UCP Merchant Server
 
-[![CI](https://github.com/Kurehhaa/ucp-merchant-server/actions/workflows/ci.yml/badge.svg)](https://github.com/Kurehhaa/ucp-merchant-server/actions/workflows/ci.yml)
+[![CI](https://github.com/Kurehhaa/ucp-merchant-server-hardened/actions/workflows/ci.yml/badge.svg)](https://github.com/Kurehhaa/ucp-merchant-server-hardened/actions/workflows/ci.yml)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688.svg?logo=fastapi)](https://fastapi.tiangolo.com)
