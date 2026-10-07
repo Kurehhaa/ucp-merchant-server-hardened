@@ -47,8 +47,6 @@ def _make_app(**overrides):
     overrides.setdefault("admin_api_key", ADMIN_KEY)
     application = create_app(UCPMerchantSettings(environment="testing", **overrides))
     application.state.webhook_manager._resolver = public_resolver
-    # Same workaround as tests/test_api.py (OrderTracker structlog kwarg clash).
-    application.state.order_manager._tracker = None
     return application
 
 
@@ -174,12 +172,22 @@ class TestSignatureCoverage:
     @pytest.mark.parametrize(
         "field, tamper",
         [
-            ("expires_at", lambda m: m.update(
-                expires_at=(datetime.fromisoformat(m["expires_at"]) + timedelta(hours=2)).isoformat()
-            )),
-            ("issued_at", lambda m: m.update(
-                issued_at=(datetime.fromisoformat(m["issued_at"]) - timedelta(minutes=1)).isoformat()
-            )),
+            (
+                "expires_at",
+                lambda m: m.update(
+                    expires_at=(
+                        datetime.fromisoformat(m["expires_at"]) + timedelta(hours=2)
+                    ).isoformat()
+                ),
+            ),
+            (
+                "issued_at",
+                lambda m: m.update(
+                    issued_at=(
+                        datetime.fromisoformat(m["issued_at"]) - timedelta(minutes=1)
+                    ).isoformat()
+                ),
+            ),
             ("amount", lambda m: m.update(amount={"amount": 1.0, "currency": "USD"})),
             ("cart_hash", lambda m: m.update(cart_hash="0" * 64)),
             ("mandate_id", lambda m: m.update(mandate_id="mandate_forged")),
@@ -209,7 +217,9 @@ class TestSignatureCoverage:
 
     async def test_wrong_merchant_is_rejected(self, client, agent, session_json):
         mandate = agent.cart_mandate(session_json, merchant_id="merchant_someone_else")
-        assert _has(_errors(await self._verify(client, mandate.model_dump(mode="json"))), "merchant")
+        assert _has(
+            _errors(await self._verify(client, mandate.model_dump(mode="json"))), "merchant"
+        )
 
     @pytest.mark.parametrize("zone", [UTC, timezone(timedelta(hours=5))])
     async def test_timezone_aware_timestamps_are_accepted(self, client, agent, session_json, zone):
@@ -240,9 +250,7 @@ class TestValidityWindow:
 
     async def test_expired_mandate_is_rejected(self, client, agent, session_json):
         past = datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=1)
-        errors = await self._errors_for(
-            client, agent, session_json, issued_at=past, ttl_seconds=60
-        )
+        errors = await self._errors_for(client, agent, session_json, issued_at=past, ttl_seconds=60)
         assert _has(errors, "expired")
 
     async def test_overlong_lifetime_is_rejected(self, client, agent, session_json):
@@ -371,9 +379,7 @@ class TestCompletionPolicy:
         )
         assert resp.status_code == 200
 
-    async def test_incomplete_cart_is_refused_without_burning_the_mandate(
-        self, app, client, agent
-    ):
+    async def test_incomplete_cart_is_refused_without_burning_the_mandate(self, app, client, agent):
         created = await client.post(
             "/api/v1/checkout", json={"items": [{"product_id": "laptop-001", "quantity": 1}]}
         )
@@ -547,13 +553,13 @@ class TestIntentMandates:
             lambda m: m["constraints"].update(allowed_merchants=[]),
             lambda m: m.update(agent_id="someone-else"),
             lambda m: m.update(
-                expires_at=(datetime.fromisoformat(m["expires_at"]) + timedelta(hours=5)).isoformat()
+                expires_at=(
+                    datetime.fromisoformat(m["expires_at"]) + timedelta(hours=5)
+                ).isoformat()
             ),
         ],
     )
-    async def test_tampering_with_any_constraint_breaks_the_signature(
-        self, client, agent, tamper
-    ):
+    async def test_tampering_with_any_constraint_breaks_the_signature(self, client, agent, tamper):
         mandate = _intent(agent).model_dump(mode="json")
         tamper(mandate)
         resp = await self._verify(client, mandate)

@@ -25,10 +25,6 @@ def settings():
 @pytest.fixture
 def app(settings):
     application = create_app(settings)
-    # Disable the order tracker to avoid a structlog keyword conflict
-    # in OrderTracker.notify_update (the `event` kwarg clashes with
-    # structlog's implicit first `event` positional parameter).
-    application.state.order_manager._tracker = None
     application.state.webhook_manager._resolver = public_resolver
     return application
 
@@ -36,9 +32,7 @@ def app(settings):
 @pytest.fixture
 async def client(app):
     transport = ASGITransport(app=app)
-    async with AsyncClient(
-        transport=transport, base_url="http://test", headers=ADMIN_HEADERS
-    ) as c:
+    async with AsyncClient(transport=transport, base_url="http://test", headers=ADMIN_HEADERS) as c:
         yield c
 
 
@@ -52,15 +46,10 @@ def agent(app):
 async def demo_client():
     """Client for an app with the server-side demo signing endpoints enabled."""
     application = create_app(
-        UCPMerchantSettings(
-            environment="testing", ap2_demo_mode=True, admin_api_key=ADMIN_KEY
-        )
+        UCPMerchantSettings(environment="testing", ap2_demo_mode=True, admin_api_key=ADMIN_KEY)
     )
-    application.state.order_manager._tracker = None
     transport = ASGITransport(app=application)
-    async with AsyncClient(
-        transport=transport, base_url="http://test", headers=ADMIN_HEADERS
-    ) as c:
+    async with AsyncClient(transport=transport, base_url="http://test", headers=ADMIN_HEADERS) as c:
         yield c
 
 
@@ -111,13 +100,16 @@ class TestDiscovery:
         assert "google.pay" in handler_ids
 
     async def test_negotiate_capabilities(self, client):
-        resp = await client.post("/api/v1/negotiate", json={
-            "agent_id": "test-agent-001",
-            "agent_name": "Test Agent",
-            "requested_capabilities": ["dev.ucp.shopping.checkout"],
-            "requested_extensions": ["dev.ucp.shopping.fulfillment"],
-            "supported_payment_handlers": ["dev.ucp.mock_payment"],
-        })
+        resp = await client.post(
+            "/api/v1/negotiate",
+            json={
+                "agent_id": "test-agent-001",
+                "agent_name": "Test Agent",
+                "requested_capabilities": ["dev.ucp.shopping.checkout"],
+                "requested_extensions": ["dev.ucp.shopping.fulfillment"],
+                "supported_payment_handlers": ["dev.ucp.mock_payment"],
+            },
+        )
         assert resp.status_code == 200
         data = resp.json()
         assert "negotiation_id" in data
@@ -152,9 +144,9 @@ class TestCatalog:
             assert p["category"] == "laptops"
 
     async def test_filter_by_price_range(self, client):
-        resp = await client.get("/api/v1/catalog/search", params={
-            "min_price": 50, "max_price": 200
-        })
+        resp = await client.get(
+            "/api/v1/catalog/search", params={"min_price": 50, "max_price": 200}
+        )
         assert resp.status_code == 200
         data = resp.json()
         for p in data["products"]:
@@ -194,12 +186,15 @@ class TestCatalog:
 class TestCheckout:
     async def _create_checkout(self, client):
         """Create a checkout session with known product IDs."""
-        resp = await client.post("/api/v1/checkout", json={
-            "items": [
-                {"product_id": "laptop-001", "quantity": 1},
-                {"product_id": "kb-001", "quantity": 1},
-            ]
-        })
+        resp = await client.post(
+            "/api/v1/checkout",
+            json={
+                "items": [
+                    {"product_id": "laptop-001", "quantity": 1},
+                    {"product_id": "kb-001", "quantity": 1},
+                ]
+            },
+        )
         return resp
 
     async def test_create_session(self, client):
@@ -225,16 +220,19 @@ class TestCheckout:
     async def test_update_session_address(self, client):
         create_resp = await self._create_checkout(client)
         session_id = create_resp.json()["id"]
-        resp = await client.patch(f"/api/v1/checkout/{session_id}", json={
-            "shipping_address": {
-                "full_name": "Test User",
-                "line1": "123 Main St",
-                "city": "San Francisco",
-                "state": "CA",
-                "postal_code": "94105",
-                "country": "US",
-            }
-        })
+        resp = await client.patch(
+            f"/api/v1/checkout/{session_id}",
+            json={
+                "shipping_address": {
+                    "full_name": "Test User",
+                    "line1": "123 Main St",
+                    "city": "San Francisco",
+                    "state": "CA",
+                    "postal_code": "94105",
+                    "country": "US",
+                }
+            },
+        )
         assert resp.status_code == 200
         data = resp.json()
         assert data["shipping_address"] is not None
@@ -244,20 +242,23 @@ class TestCheckout:
         create_resp = await self._create_checkout(client)
         session_id = create_resp.json()["id"]
         # Set address first
-        await client.patch(f"/api/v1/checkout/{session_id}", json={
-            "shipping_address": {
-                "full_name": "Test User",
-                "line1": "123 Main St",
-                "city": "San Francisco",
-                "state": "CA",
-                "postal_code": "94105",
-                "country": "US",
-            }
-        })
+        await client.patch(
+            f"/api/v1/checkout/{session_id}",
+            json={
+                "shipping_address": {
+                    "full_name": "Test User",
+                    "line1": "123 Main St",
+                    "city": "San Francisco",
+                    "state": "CA",
+                    "postal_code": "94105",
+                    "country": "US",
+                }
+            },
+        )
         # Select shipping
-        resp = await client.patch(f"/api/v1/checkout/{session_id}", json={
-            "shipping_option_id": "shipping_standard"
-        })
+        resp = await client.patch(
+            f"/api/v1/checkout/{session_id}", json={"shipping_option_id": "shipping_standard"}
+        )
         assert resp.status_code == 200
         data = resp.json()
         assert data["selected_shipping"] is not None
@@ -266,9 +267,9 @@ class TestCheckout:
     async def test_apply_discount(self, client):
         create_resp = await self._create_checkout(client)
         session_id = create_resp.json()["id"]
-        resp = await client.patch(f"/api/v1/checkout/{session_id}", json={
-            "discount_code": "SAVE10"
-        })
+        resp = await client.patch(
+            f"/api/v1/checkout/{session_id}", json={"discount_code": "SAVE10"}
+        )
         assert resp.status_code == 200
         data = resp.json()
         assert data["applied_discount"] is not None
@@ -282,21 +283,24 @@ class TestCheckout:
         assert initial_state in ("incomplete", "requires_escalation")
 
         # Add address
-        await client.patch(f"/api/v1/checkout/{session_id}", json={
-            "shipping_address": {
-                "full_name": "Test User",
-                "line1": "123 Main St",
-                "city": "San Francisco",
-                "state": "CA",
-                "postal_code": "94105",
-                "country": "US",
-            }
-        })
+        await client.patch(
+            f"/api/v1/checkout/{session_id}",
+            json={
+                "shipping_address": {
+                    "full_name": "Test User",
+                    "line1": "123 Main St",
+                    "city": "San Francisco",
+                    "state": "CA",
+                    "postal_code": "94105",
+                    "country": "US",
+                }
+            },
+        )
 
         # Select shipping
-        resp = await client.patch(f"/api/v1/checkout/{session_id}", json={
-            "shipping_option_id": "shipping_standard"
-        })
+        resp = await client.patch(
+            f"/api/v1/checkout/{session_id}", json={"shipping_option_id": "shipping_standard"}
+        )
         data = resp.json()
         assert data["state"] == "ready_for_complete"
 
@@ -305,19 +309,22 @@ class TestCheckout:
         session_id = create_resp.json()["id"]
 
         # Fill required fields
-        await client.patch(f"/api/v1/checkout/{session_id}", json={
-            "shipping_address": {
-                "full_name": "Test User",
-                "line1": "123 Main St",
-                "city": "San Francisco",
-                "state": "CA",
-                "postal_code": "94105",
-                "country": "US",
-            }
-        })
-        await client.patch(f"/api/v1/checkout/{session_id}", json={
-            "shipping_option_id": "shipping_standard"
-        })
+        await client.patch(
+            f"/api/v1/checkout/{session_id}",
+            json={
+                "shipping_address": {
+                    "full_name": "Test User",
+                    "line1": "123 Main St",
+                    "city": "San Francisco",
+                    "state": "CA",
+                    "postal_code": "94105",
+                    "country": "US",
+                }
+            },
+        )
+        await client.patch(
+            f"/api/v1/checkout/{session_id}", json={"shipping_option_id": "shipping_standard"}
+        )
 
         resp = await complete_with_mandate(client, agent, session_id)
         assert resp.status_code == 200
@@ -399,25 +406,31 @@ class TestPayments:
         key_id = key_resp.json()["key_id"]
 
         # Create checkout session
-        create_resp = await demo_client.post("/api/v1/checkout", json={
-            "items": [{"product_id": "laptop-001", "quantity": 1}]
-        })
+        create_resp = await demo_client.post(
+            "/api/v1/checkout", json={"items": [{"product_id": "laptop-001", "quantity": 1}]}
+        )
         session_id = create_resp.json()["id"]
 
         # Create test mandate
-        resp = await demo_client.post("/api/v1/payments/test-mandate", json={
-            "session_id": session_id,
-            "key_id": key_id,
-        })
+        resp = await demo_client.post(
+            "/api/v1/payments/test-mandate",
+            json={
+                "session_id": session_id,
+                "key_id": key_id,
+            },
+        )
         assert resp.status_code == 200
         mandate = resp.json()
         assert "signature" in mandate
         assert "mandate_id" in mandate
 
         # Verify it
-        resp = await demo_client.post("/api/v1/payments/verify/cart", json={
-            "mandate": mandate,
-        })
+        resp = await demo_client.post(
+            "/api/v1/payments/verify/cart",
+            json={
+                "mandate": mandate,
+            },
+        )
         assert resp.status_code == 200
         result = resp.json()
         assert result["valid"] is True
@@ -429,22 +442,28 @@ class TestPayments:
         key_id = key_resp.json()["key_id"]
 
         # Create test intent mandate
-        resp = await demo_client.post("/api/v1/payments/test-intent-mandate", json={
-            "agent_id": "test-agent",
-            "key_id": key_id,
-            "max_amount": 500.0,
-            "time_window_seconds": 3600,
-        })
+        resp = await demo_client.post(
+            "/api/v1/payments/test-intent-mandate",
+            json={
+                "agent_id": "test-agent",
+                "key_id": key_id,
+                "max_amount": 500.0,
+                "time_window_seconds": 3600,
+            },
+        )
         assert resp.status_code == 200
         mandate = resp.json()
         assert "signature" in mandate
         assert mandate["mandate_type"] == "intent"
 
         # Verify it
-        resp = await demo_client.post("/api/v1/payments/verify/intent", json={
-            "mandate": mandate,
-            "requested_amount": 100.0,
-        })
+        resp = await demo_client.post(
+            "/api/v1/payments/verify/intent",
+            json={
+                "mandate": mandate,
+                "requested_amount": 100.0,
+            },
+        )
         assert resp.status_code == 200
         result = resp.json()
         assert result["valid"] is True
@@ -454,23 +473,26 @@ class TestPayments:
 class TestOrders:
     async def _create_completed_checkout(self, client, agent):
         """Create a completed checkout and return the response data."""
-        create_resp = await client.post("/api/v1/checkout", json={
-            "items": [{"product_id": "laptop-001", "quantity": 1}]
-        })
+        create_resp = await client.post(
+            "/api/v1/checkout", json={"items": [{"product_id": "laptop-001", "quantity": 1}]}
+        )
         session_id = create_resp.json()["id"]
-        await client.patch(f"/api/v1/checkout/{session_id}", json={
-            "shipping_address": {
-                "full_name": "Test User",
-                "line1": "123 Main St",
-                "city": "SF",
-                "state": "CA",
-                "postal_code": "94105",
-                "country": "US",
-            }
-        })
-        await client.patch(f"/api/v1/checkout/{session_id}", json={
-            "shipping_option_id": "shipping_standard"
-        })
+        await client.patch(
+            f"/api/v1/checkout/{session_id}",
+            json={
+                "shipping_address": {
+                    "full_name": "Test User",
+                    "line1": "123 Main St",
+                    "city": "SF",
+                    "state": "CA",
+                    "postal_code": "94105",
+                    "country": "US",
+                }
+            },
+        )
+        await client.patch(
+            f"/api/v1/checkout/{session_id}", json={"shipping_option_id": "shipping_standard"}
+        )
         resp = await complete_with_mandate(client, agent, session_id)
         return resp.json()
 
@@ -519,10 +541,13 @@ class TestOrders:
 
 class TestWebhooks:
     async def test_register_webhook(self, client):
-        resp = await client.post("/api/v1/webhooks", json={
-            "url": "https://example.com/webhook",
-            "events": ["order_confirmed", "order_shipped"],
-        })
+        resp = await client.post(
+            "/api/v1/webhooks",
+            json={
+                "url": "https://example.com/webhook",
+                "events": ["order_confirmed", "order_shipped"],
+            },
+        )
         assert resp.status_code == 200
         data = resp.json()
         assert "id" in data
@@ -530,9 +555,12 @@ class TestWebhooks:
         assert data["active"] is True
 
     async def test_list_webhooks(self, client):
-        await client.post("/api/v1/webhooks", json={
-            "url": "https://example.com/webhook",
-        })
+        await client.post(
+            "/api/v1/webhooks",
+            json={
+                "url": "https://example.com/webhook",
+            },
+        )
         resp = await client.get("/api/v1/webhooks")
         assert resp.status_code == 200
         data = resp.json()
@@ -552,26 +580,25 @@ class TestMCP:
         assert "create_checkout" in tool_names
 
     async def test_execute_search_tool(self, client):
-        resp = await client.post("/api/v1/mcp/tools/search_products/execute", json={
-            "arguments": {"query": "laptop"}
-        })
+        resp = await client.post(
+            "/api/v1/mcp/tools/search_products/execute", json={"arguments": {"query": "laptop"}}
+        )
         assert resp.status_code == 200
         data = resp.json()
         assert data["success"] is True
         assert data["tool_name"] == "search_products"
 
     async def test_execute_get_product_tool(self, client):
-        resp = await client.post("/api/v1/mcp/tools/get_product/execute", json={
-            "arguments": {"product_id": "laptop-001"}
-        })
+        resp = await client.post(
+            "/api/v1/mcp/tools/get_product/execute",
+            json={"arguments": {"product_id": "laptop-001"}},
+        )
         assert resp.status_code == 200
         data = resp.json()
         assert data["success"] is True
 
     async def test_execute_unknown_tool(self, client):
-        resp = await client.post("/api/v1/mcp/tools/nonexistent/execute", json={
-            "arguments": {}
-        })
+        resp = await client.post("/api/v1/mcp/tools/nonexistent/execute", json={"arguments": {}})
         assert resp.status_code == 200
         data = resp.json()
         assert data["success"] is False

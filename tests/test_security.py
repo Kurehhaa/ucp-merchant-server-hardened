@@ -75,9 +75,7 @@ class TestAdminAccess:
 
     @pytest.mark.parametrize("wrong", ["", "wrong", ADMIN_KEY + "x", ADMIN_KEY[:-1]])
     async def test_wrong_key_is_rejected(self, wrong):
-        async with _client(
-            _app(admin_api_key=ADMIN_KEY), headers={"X-API-Key": wrong}
-        ) as c:
+        async with _client(_app(admin_api_key=ADMIN_KEY), headers={"X-API-Key": wrong}) as c:
             resp = await c.get("/api/v1/orders")
         assert resp.status_code == 401
 
@@ -188,9 +186,7 @@ class TestWebhookUrlValidation:
 
     async def test_register_endpoint_returns_400_for_internal_targets(self):
         async with _client(_app(admin_api_key=ADMIN_KEY), headers=ADMIN_HEADERS) as c:
-            resp = await c.post(
-                "/api/v1/webhooks", json={"url": "https://169.254.169.254/latest"}
-            )
+            resp = await c.post("/api/v1/webhooks", json={"url": "https://169.254.169.254/latest"})
             assert resp.status_code == 400
             assert "non-public" in resp.json()["detail"]
             assert (await c.get("/api/v1/webhooks")).json()["total"] == 0
@@ -245,7 +241,9 @@ class TestCors:
         assert "access-control-allow-credentials" not in resp.headers
 
     def test_origin_list_parsing(self):
-        settings = UCPMerchantSettings(cors_allow_origins=" https://a.example , ,https://b.example ")
+        settings = UCPMerchantSettings(
+            cors_allow_origins=" https://a.example , ,https://b.example "
+        )
         assert settings.cors_origins == ["https://a.example", "https://b.example"]
         assert UCPMerchantSettings(cors_allow_origins="").cors_origins == []
 

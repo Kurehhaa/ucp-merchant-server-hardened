@@ -7,7 +7,6 @@ to manage the full checkout lifecycle from creation to completion.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
 from typing import Any
 
 import structlog
@@ -158,9 +157,7 @@ class CheckoutSessionManager:
         session = self.get_session(session_id)
 
         if session.state in (CheckoutState.COMPLETED, CheckoutState.ABANDONED):
-            raise ValueError(
-                f"Cannot update session in terminal state: {session.state.value!r}"
-            )
+            raise ValueError(f"Cannot update session in terminal state: {session.state.value!r}")
 
         # Add items
         for item_spec in updates.get("add_items", []):
@@ -172,9 +169,7 @@ class CheckoutSessionManager:
 
         # Remove items
         for product_id in updates.get("remove_items", []):
-            session.line_items = [
-                li for li in session.line_items if li.product_id != product_id
-            ]
+            session.line_items = [li for li in session.line_items if li.product_id != product_id]
 
         # Shipping address
         if "shipping_address" in updates:
@@ -189,15 +184,11 @@ class CheckoutSessionManager:
 
         # Shipping option
         if "shipping_option_id" in updates:
-            session = self._fulfillment.apply_shipping(
-                session, updates["shipping_option_id"]
-            )
+            session = self._fulfillment.apply_shipping(session, updates["shipping_option_id"])
 
         # Discount code
         if "discount_code" in updates:
-            session = self._discounts.apply_discount(
-                session, updates["discount_code"]
-            )
+            session = self._discounts.apply_discount(session, updates["discount_code"])
 
         session = self._recalculate(session)
         self._sessions[session_id] = session

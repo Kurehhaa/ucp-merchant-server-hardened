@@ -6,8 +6,6 @@ Discounts validates and applies coupon codes.
 
 from __future__ import annotations
 
-from datetime import datetime
-
 import structlog
 
 from ucp_merchant.models import (
@@ -17,6 +15,7 @@ from ucp_merchant.models import (
     Money,
     ShippingOption,
 )
+from ucp_merchant.utils import utcnow
 
 logger = structlog.get_logger(__name__)
 
@@ -97,9 +96,7 @@ class FulfillmentExtension:
                 return opt
         return None
 
-    def apply_shipping(
-        self, session: CheckoutSession, option_id: str
-    ) -> CheckoutSession:
+    def apply_shipping(self, session: CheckoutSession, option_id: str) -> CheckoutSession:
         """Set the selected shipping option on the session.
 
         Parameters
@@ -133,7 +130,7 @@ class FulfillmentExtension:
 
         session.selected_shipping = option
         session.shipping_cost = option.price
-        session.updated_at = datetime.utcnow()
+        session.updated_at = utcnow()
 
         logger.info(
             "shipping_selected",
@@ -211,9 +208,7 @@ class DiscountExtension:
             raise ValueError(f"Invalid discount code: {code!r}")
         return discount
 
-    def apply_discount(
-        self, session: CheckoutSession, code: str
-    ) -> CheckoutSession:
+    def apply_discount(self, session: CheckoutSession, code: str) -> CheckoutSession:
         """Apply a discount code to the checkout session.
 
         Parameters
@@ -261,7 +256,7 @@ class DiscountExtension:
             discount_type=discount.discount_type,
             discount_amount=discount_amount,
         )
-        session.updated_at = datetime.utcnow()
+        session.updated_at = utcnow()
 
         logger.info(
             "discount_applied",

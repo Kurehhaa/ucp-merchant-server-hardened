@@ -350,9 +350,7 @@ def create_app(settings: UCPMerchantSettings | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.patch("/api/v1/checkout/{session_id}", tags=["checkout"])
-    async def update_checkout(
-        session_id: str, req: UpdateCheckoutRequest
-    ) -> dict[str, Any]:
+    async def update_checkout(session_id: str, req: UpdateCheckoutRequest) -> dict[str, Any]:
         """Update a checkout session (add items, set address, etc.)."""
         updates: dict[str, Any] = {}
         if req.add_items is not None:
@@ -449,9 +447,7 @@ def create_app(settings: UCPMerchantSettings | None = None) -> FastAPI:
         except SessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-        options = checkout_manager.fulfillment.get_shipping_options(
-            session.subtotal.amount
-        )
+        options = checkout_manager.fulfillment.get_shipping_options(session.subtotal.amount)
         return {
             "session_id": session_id,
             "subtotal": session.subtotal.amount,
@@ -464,9 +460,7 @@ def create_app(settings: UCPMerchantSettings | None = None) -> FastAPI:
     ) -> dict[str, Any]:
         """Apply a discount code to a checkout session."""
         try:
-            session = checkout_manager.update_session(
-                session_id, {"discount_code": code}
-            )
+            session = checkout_manager.update_session(session_id, {"discount_code": code})
             return session.model_dump(mode="json")
         except SessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -519,9 +513,7 @@ def create_app(settings: UCPMerchantSettings | None = None) -> FastAPI:
                 "info": info.model_dump(mode="json"),
             }
         except KeyError:
-            raise HTTPException(
-                status_code=404, detail=f"Key not found: {key_id}"
-            ) from None
+            raise HTTPException(status_code=404, detail=f"Key not found: {key_id}") from None
 
     @app.post("/api/v1/payments/verify/cart", tags=["payments"])
     async def verify_cart_mandate(req: VerifyCartMandateRequest) -> dict[str, Any]:
@@ -569,9 +561,7 @@ def create_app(settings: UCPMerchantSettings | None = None) -> FastAPI:
             mandate = mandate_verifier.create_test_mandate(session, req.key_id)
             return mandate.model_dump(mode="json")
         except KeyError:
-            raise HTTPException(
-                status_code=404, detail=f"Key not found: {req.key_id}"
-            ) from None
+            raise HTTPException(status_code=404, detail=f"Key not found: {req.key_id}") from None
 
     @app.post(
         "/api/v1/payments/test-intent-mandate",
@@ -592,9 +582,7 @@ def create_app(settings: UCPMerchantSettings | None = None) -> FastAPI:
             )
             return mandate.model_dump(mode="json")
         except KeyError:
-            raise HTTPException(
-                status_code=404, detail=f"Key not found: {req.key_id}"
-            ) from None
+            raise HTTPException(status_code=404, detail=f"Key not found: {req.key_id}") from None
 
     # ======================================================================
     # ORDERS
@@ -618,7 +606,9 @@ def create_app(settings: UCPMerchantSettings | None = None) -> FastAPI:
         except OrderNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    @app.post("/api/v1/orders/{order_id}/advance", tags=["orders"], dependencies=[Depends(require_admin)])
+    @app.post(
+        "/api/v1/orders/{order_id}/advance", tags=["orders"], dependencies=[Depends(require_admin)]
+    )
     async def advance_order(order_id: str) -> dict[str, Any]:
         """Advance the order to the next state."""
         try:
@@ -629,7 +619,9 @@ def create_app(settings: UCPMerchantSettings | None = None) -> FastAPI:
         except InvalidOrderStateError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    @app.post("/api/v1/orders/{order_id}/cancel", tags=["orders"], dependencies=[Depends(require_admin)])
+    @app.post(
+        "/api/v1/orders/{order_id}/cancel", tags=["orders"], dependencies=[Depends(require_admin)]
+    )
     async def cancel_order(order_id: str) -> dict[str, Any]:
         """Cancel an order."""
         try:
@@ -640,7 +632,11 @@ def create_app(settings: UCPMerchantSettings | None = None) -> FastAPI:
         except InvalidOrderStateError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    @app.post("/api/v1/orders/{order_id}/simulate-fulfillment", tags=["orders"], dependencies=[Depends(require_admin)])
+    @app.post(
+        "/api/v1/orders/{order_id}/simulate-fulfillment",
+        tags=["orders"],
+        dependencies=[Depends(require_admin)],
+    )
     async def simulate_fulfillment(order_id: str) -> dict[str, Any]:
         """Fast-forward an order to SHIPPED state with tracking info."""
         try:
@@ -677,9 +673,7 @@ def create_app(settings: UCPMerchantSettings | None = None) -> FastAPI:
     async def register_webhook(req: RegisterWebhookRequest) -> dict[str, Any]:
         """Register a webhook endpoint for order events."""
         try:
-            registration = webhook_manager.register_webhook(
-                url=req.url, events=req.events
-            )
+            registration = webhook_manager.register_webhook(url=req.url, events=req.events)
             return registration.model_dump(mode="json")
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -707,9 +701,7 @@ def create_app(settings: UCPMerchantSettings | None = None) -> FastAPI:
         }
 
     @app.post("/api/v1/mcp/tools/{tool_name}/execute", tags=["mcp"])
-    async def execute_mcp_tool(
-        tool_name: str, req: MCPExecuteRequest
-    ) -> dict[str, Any]:
+    async def execute_mcp_tool(tool_name: str, req: MCPExecuteRequest) -> dict[str, Any]:
         """Execute an MCP tool by name."""
         result = await mcp_handler.execute(tool_name, req.arguments)
         return result.model_dump(mode="json")
@@ -719,9 +711,7 @@ def create_app(settings: UCPMerchantSettings | None = None) -> FastAPI:
     # ======================================================================
 
     @app.exception_handler(Exception)
-    async def generic_exception_handler(
-        request: Request, exc: Exception
-    ) -> JSONResponse:
+    async def generic_exception_handler(request: Request, exc: Exception) -> JSONResponse:
         """Catch-all: log the details, return only a reference to the client."""
         error_id = uuid.uuid4().hex[:12]
         logger.error(

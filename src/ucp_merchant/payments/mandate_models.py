@@ -16,6 +16,7 @@ from ucp_merchant.models import (
     MandateVerificationResult,
     Money,
 )
+from ucp_merchant.utils import utcnow
 
 __all__ = [
     "CartMandate",
@@ -41,19 +42,18 @@ def is_mandate_expired(mandate: CartMandate | IntentMandate) -> bool:
     bool
         ``True`` if the mandate has an expiry and that expiry is in the past.
     """
-    from datetime import datetime
 
     if mandate.expires_at is None:
         return False
-    return datetime.utcnow() > mandate.expires_at
+    return utcnow() > mandate.expires_at
 
 
-def mandate_summary(mandate: CartMandate | IntentMandate) -> dict[str, str]:
+def mandate_summary(mandate: CartMandate | IntentMandate) -> dict[str, str | bool]:
     """Return a human-readable summary dict for a mandate.
 
     Useful for logging and API responses.
     """
-    base = {
+    base: dict[str, str | bool] = {
         "mandate_id": mandate.mandate_id,
         "type": mandate.mandate_type.value,
         "issued_at": mandate.issued_at.isoformat(),
@@ -70,8 +70,6 @@ def mandate_summary(mandate: CartMandate | IntentMandate) -> dict[str, str]:
         base["agent_id"] = mandate.agent_id
         if mandate.constraints.max_amount:
             base["max_amount"] = f"{mandate.constraints.max_amount.amount:.2f}"
-        base["allowed_merchants"] = ", ".join(
-            mandate.constraints.allowed_merchants
-        ) or "any"
+        base["allowed_merchants"] = ", ".join(mandate.constraints.allowed_merchants) or "any"
 
     return base

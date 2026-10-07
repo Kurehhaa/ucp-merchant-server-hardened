@@ -11,7 +11,12 @@ from typing import Any
 
 import structlog
 
+from ucp_merchant.catalog.products import ProductCatalog
+from ucp_merchant.catalog.search import CatalogSearch
+from ucp_merchant.checkout.session import CheckoutSessionManager
 from ucp_merchant.models import MCPToolDefinition, MCPToolResult
+from ucp_merchant.orders.lifecycle import OrderManager
+from ucp_merchant.payments.ap2_verification import MandateVerifier
 
 logger = structlog.get_logger(__name__)
 
@@ -286,11 +291,11 @@ class MCPToolHandler:
 
     def __init__(
         self,
-        checkout_manager: Any,
-        catalog_search: Any,
-        catalog: Any,
-        order_manager: Any,
-        mandate_verifier: Any = None,
+        checkout_manager: CheckoutSessionManager,
+        catalog_search: CatalogSearch,
+        catalog: ProductCatalog,
+        order_manager: OrderManager,
+        mandate_verifier: MandateVerifier | None = None,
         require_mandate: bool = False,
     ) -> None:
         if require_mandate and mandate_verifier is None:
@@ -383,9 +388,7 @@ class MCPToolHandler:
         return product.model_dump(mode="json")
 
     def _create_checkout(self, args: dict[str, Any]) -> dict[str, Any]:
-        session = self._checkout.create_session(
-            line_items=args.get("items", [])
-        )
+        session = self._checkout.create_session(line_items=args.get("items", []))
         return session.model_dump(mode="json")
 
     def _update_checkout(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -415,7 +418,10 @@ class MCPToolHandler:
         session = self._checkout.assert_ready_for_completion(session_id)
 
         mandate = None
+        verifier = self._verifier
         if self._require_mandate:
+            if verifier is None:  # guarded in __init__; keeps the type checker honest
+                raise RuntimeError("Mandate verification is required but not configured")
             raw_mandate = args.get("cart_mandate")
             if raw_mandate is None:
                 raise ValueError(
@@ -423,7 +429,7 @@ class MCPToolHandler:
                 )
             mandate = CartMandate.model_validate(raw_mandate)
             # Raises MandateRejected (a ValueError) -> reported as a tool error.
-            self._verifier.authorize_checkout(session, mandate)
+            verifier.authorize_checkout(session, mandate)
 
         completed = False
         try:
@@ -432,8 +438,8 @@ class MCPToolHandler:
             order = self._orders.create_order(session)
             completed = True
         finally:
-            if mandate is not None and not completed:
-                self._verifier.release_authorization(mandate)
+            if mandate is not None and verifier is not None and not completed:
+                verifier.release_authorization(mandate)
         return {
             "session": session.model_dump(mode="json"),
             "order": order.model_dump(mode="json"),

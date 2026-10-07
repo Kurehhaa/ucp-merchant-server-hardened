@@ -104,9 +104,7 @@ class CatalogSearch:
         return results
 
     @staticmethod
-    def _category_filter(
-        products: list[Product], category: str
-    ) -> list[Product]:
+    def _category_filter(products: list[Product], category: str) -> list[Product]:
         """Filter by category value (case-insensitive)."""
         try:
             cat = ProductCategory(category.lower())

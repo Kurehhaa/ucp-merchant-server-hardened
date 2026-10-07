@@ -17,7 +17,6 @@ import base64
 import binascii
 import hashlib
 import json
-from datetime import datetime
 from typing import Any
 
 import structlog
@@ -30,6 +29,7 @@ from cryptography.hazmat.primitives.serialization import (
 )
 
 from ucp_merchant.models import KeyPairInfo
+from ucp_merchant.utils import utcnow
 
 logger = structlog.get_logger(__name__)
 
@@ -110,7 +110,7 @@ class KeyManager:
             key_id=key_id,
             algorithm="ES256",
             curve="P-256",
-            created_at=datetime.utcnow(),
+            created_at=utcnow(),
             public_key_jwk=public_jwk,
         )
         self._public_keys[key_id] = public_key
@@ -223,9 +223,7 @@ class KeyManager:
             coordinates.append(int.from_bytes(raw, "big"))
 
         try:
-            numbers = ec.EllipticCurvePublicNumbers(
-                coordinates[0], coordinates[1], ec.SECP256R1()
-            )
+            numbers = ec.EllipticCurvePublicNumbers(coordinates[0], coordinates[1], ec.SECP256R1())
             return numbers.public_key()
         except ValueError as exc:
             raise InvalidKeyError("JWK point is not on curve P-256") from exc

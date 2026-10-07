@@ -10,7 +10,6 @@ import ipaddress
 import socket
 import uuid
 from collections.abc import Callable
-from datetime import datetime
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -18,6 +17,7 @@ import httpx
 import structlog
 
 from ucp_merchant.models import WebhookPayload, WebhookRegistration
+from ucp_merchant.utils import utcnow
 
 logger = structlog.get_logger(__name__)
 
@@ -91,18 +91,14 @@ def validate_webhook_url(
             raise WebhookURLError(f"Webhook host {host!r} could not be resolved") from None
         addresses = [str(info[4][0]) for info in infos]
         if not addresses:
-            raise WebhookURLError(
-                f"Webhook host {host!r} could not be resolved"
-            ) from None
+            raise WebhookURLError(f"Webhook host {host!r} could not be resolved") from None
 
     for address in addresses:
         ip = ipaddress.ip_address(address.split("%", 1)[0])  # drop IPv6 zone id
         if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
             ip = ip.ipv4_mapped
         if not ip.is_global or ip.is_multicast or ip.is_unspecified:
-            raise WebhookURLError(
-                f"Webhook host {host!r} resolves to a non-public address"
-            )
+            raise WebhookURLError(f"Webhook host {host!r} resolves to a non-public address")
 
 
 class WebhookManager:
@@ -166,8 +162,7 @@ class WebhookManager:
             invalid = [e for e in events if e not in SUPPORTED_EVENTS]
             if invalid:
                 raise ValueError(
-                    f"Unsupported event types: {invalid}. "
-                    f"Supported: {SUPPORTED_EVENTS}"
+                    f"Unsupported event types: {invalid}. Supported: {SUPPORTED_EVENTS}"
                 )
 
         webhook_id = f"wh_{uuid.uuid4().hex[:12]}"
@@ -175,7 +170,7 @@ class WebhookManager:
             id=webhook_id,
             url=url,
             events=events,
-            created_at=datetime.utcnow(),
+            created_at=utcnow(),
             active=True,
         )
         self._registrations[webhook_id] = registration
@@ -247,7 +242,7 @@ class WebhookManager:
                 event_type=event_type,
                 order_id=order_id,
                 payload=payload,
-                delivered_at=datetime.utcnow(),
+                delivered_at=utcnow(),
             )
 
             result = await self._deliver(reg, webhook_payload)

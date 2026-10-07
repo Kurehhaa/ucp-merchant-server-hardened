@@ -55,9 +55,7 @@ class AgentSimulator:
 
     async def register(self, client: AsyncClient) -> str:
         """Register the public key with the merchant (idempotent)."""
-        resp = await client.post(
-            "/api/v1/payments/keys/register", json={"jwk": self.public_jwk}
-        )
+        resp = await client.post("/api/v1/payments/keys/register", json={"jwk": self.public_jwk})
         assert resp.status_code == 200, resp.text
         self.key_id = resp.json()["key_id"]
         return self.key_id
@@ -137,4 +135,3 @@ ADMIN_HEADERS = {"X-API-Key": ADMIN_KEY}
 def public_resolver(host: str, port: int) -> list[tuple]:
     """Stand-in for DNS: every host resolves to a public address (no network)."""
     return [(2, 1, 6, "", ("93.184.216.34", port))]
-

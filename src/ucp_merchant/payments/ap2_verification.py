@@ -126,9 +126,7 @@ def compute_cart_hash(session: CheckoutSession) -> str:
             ),
             key=lambda i: (i["product_id"], i["unit_price"], i["quantity"]),
         ),
-        "shipping_option_id": (
-            session.selected_shipping.id if session.selected_shipping else None
-        ),
+        "shipping_option_id": (session.selected_shipping.id if session.selected_shipping else None),
         "shipping_address": (
             None
             if address is None
@@ -154,9 +152,7 @@ def cart_signing_payload(mandate: CartMandate) -> bytes:
             "currency": mandate.currency,
             "cart_hash": mandate.cart_hash,
             "issued_at": canonical_timestamp(mandate.issued_at),
-            "expires_at": (
-                canonical_timestamp(mandate.expires_at) if mandate.expires_at else None
-            ),
+            "expires_at": (canonical_timestamp(mandate.expires_at) if mandate.expires_at else None),
         }
     )
 
@@ -177,9 +173,7 @@ def intent_signing_payload(mandate: IntentMandate) -> bytes:
             "allowed_categories": sorted(constraints.allowed_categories),
             "time_window_seconds": constraints.time_window_seconds,
             "issued_at": canonical_timestamp(mandate.issued_at),
-            "expires_at": (
-                canonical_timestamp(mandate.expires_at) if mandate.expires_at else None
-            ),
+            "expires_at": (canonical_timestamp(mandate.expires_at) if mandate.expires_at else None),
         }
     )
 
@@ -346,17 +340,13 @@ class MandateVerifier:
 
         if session is not None:
             self._check_cart_binding(mandate, session, errors)
-        elif expected_total is not None and _cents(mandate.amount.amount) != _cents(
-            expected_total
-        ):
+        elif expected_total is not None and _cents(mandate.amount.amount) != _cents(expected_total):
             errors.append(
                 f"Amount mismatch: mandate={mandate.amount.amount:.2f}, "
                 f"expected={expected_total:.2f}"
             )
 
-        if check_replay and self._replay_guard.is_consumed(
-            mandate.key_id, mandate.mandate_id
-        ):
+        if check_replay and self._replay_guard.is_consumed(mandate.key_id, mandate.mandate_id):
             errors.append("Mandate has already been used")
 
         return MandateVerificationResult(
@@ -388,9 +378,7 @@ class MandateVerifier:
         if not result.valid or mandate.expires_at is None:
             raise MandateRejected(402, result.errors or ["Mandate is not valid"])
 
-        if not self._replay_guard.consume(
-            mandate.key_id, mandate.mandate_id, mandate.expires_at
-        ):
+        if not self._replay_guard.consume(mandate.key_id, mandate.mandate_id, mandate.expires_at):
             raise MandateRejected(409, ["Mandate has already been used"])
 
         logger.info(
@@ -437,9 +425,7 @@ class MandateVerifier:
                 seconds=constraints.time_window_seconds
             )
             if _utcnow() > window_end:
-                errors.append(
-                    f"Time window of {constraints.time_window_seconds}s has elapsed"
-                )
+                errors.append(f"Time window of {constraints.time_window_seconds}s has elapsed")
 
         if (
             requested_amount is not None
@@ -452,13 +438,9 @@ class MandateVerifier:
             )
 
         check_merchant = merchant_id or self._settings.merchant_id
-        if (
-            constraints.allowed_merchants
-            and check_merchant not in constraints.allowed_merchants
-        ):
+        if constraints.allowed_merchants and check_merchant not in constraints.allowed_merchants:
             errors.append(
-                f"Merchant {check_merchant!r} not in allowed list: "
-                f"{constraints.allowed_merchants}"
+                f"Merchant {check_merchant!r} not in allowed list: {constraints.allowed_merchants}"
             )
 
         return MandateVerificationResult(
@@ -556,9 +538,7 @@ class MandateVerifier:
             errors.append(f"Mandate expired at {expires.isoformat()}")
         if expires <= issued:
             errors.append("Mandate expires_at must be after issued_at")
-        elif expires - issued > timedelta(
-            seconds=self._settings.ap2_max_mandate_ttl_seconds
-        ):
+        elif expires - issued > timedelta(seconds=self._settings.ap2_max_mandate_ttl_seconds):
             errors.append(
                 "Mandate lifetime exceeds the maximum of "
                 f"{self._settings.ap2_max_mandate_ttl_seconds}s"

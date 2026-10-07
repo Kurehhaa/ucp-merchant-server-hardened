@@ -10,7 +10,6 @@ from __future__ import annotations
 import random
 import string
 import uuid
-from datetime import datetime
 
 import structlog
 
@@ -21,6 +20,7 @@ from ucp_merchant.models import (
     OrderState,
     OrderStatusEvent,
 )
+from ucp_merchant.utils import utcnow
 
 logger = structlog.get_logger(__name__)
 
@@ -96,12 +96,10 @@ class OrderManager:
             If the session is not in COMPLETED state.
         """
         if session.state != CheckoutState.COMPLETED:
-            raise ValueError(
-                f"Cannot create order from session in state {session.state.value!r}"
-            )
+            raise ValueError(f"Cannot create order from session in state {session.state.value!r}")
 
         order_id = session.order_id or f"ord_{uuid.uuid4().hex[:16]}"
-        now = datetime.utcnow()
+        now = utcnow()
 
         order = Order(
             id=order_id,
@@ -185,9 +183,7 @@ class OrderManager:
         order = self.get_order(order_id)
 
         if order.state == OrderState.CANCELLED:
-            raise InvalidOrderStateError(
-                f"Cannot advance cancelled order {order_id!r}"
-            )
+            raise InvalidOrderStateError(f"Cannot advance cancelled order {order_id!r}")
 
         next_state = _ORDER_TRANSITIONS.get(order.state)
         if next_state is None:
@@ -195,7 +191,7 @@ class OrderManager:
                 f"Order {order_id!r} is already in terminal state {order.state.value!r}"
             )
 
-        now = datetime.utcnow()
+        now = utcnow()
         order.state = next_state
         order.updated_at = now
 
@@ -204,15 +200,13 @@ class OrderManager:
             order.tracking_number = _generate_tracking_number()
             order.carrier = random.choice(_CARRIERS)
             order.tracking_url = (
-                f"https://tracking.example.com/{order.carrier.lower()}/"
-                f"{order.tracking_number}"
+                f"https://tracking.example.com/{order.carrier.lower()}/{order.tracking_number}"
             )
             order.shipped_at = now
             event = OrderStatusEvent(
                 event_type="order_shipped",
                 message=(
-                    f"Order has been shipped via {order.carrier}. "
-                    f"Tracking: {order.tracking_number}"
+                    f"Order has been shipped via {order.carrier}. Tracking: {order.tracking_number}"
                 ),
                 timestamp=now,
                 metadata={
@@ -267,11 +261,9 @@ class OrderManager:
         order = self.get_order(order_id)
 
         if order.state not in (OrderState.CONFIRMED, OrderState.PROCESSING):
-            raise InvalidOrderStateError(
-                f"Cannot cancel order in state {order.state.value!r}"
-            )
+            raise InvalidOrderStateError(f"Cannot cancel order in state {order.state.value!r}")
 
-        now = datetime.utcnow()
+        now = utcnow()
         order.state = OrderState.CANCELLED
         order.cancelled_at = now
         order.updated_at = now
@@ -324,8 +316,10 @@ class OrderManager:
                 # The tracker's notify_update is sync; it enqueues for SSE.
                 self._tracker.notify_update(order_id, event)  # type: ignore[attr-defined]
             except Exception:
-                logger.debug(
+                # Tracking is best-effort: it must never fail an order change.
+                logger.warning(
                     "tracker_push_failed",
                     order_id=order_id,
-                    event=event.event_type,
+                    event_type=event.event_type,
+                    exc_info=True,
                 )

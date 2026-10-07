@@ -23,11 +23,10 @@ session should be in; :meth:`CheckoutStateMachine.sync` applies it.
 
 from __future__ import annotations
 
-from datetime import datetime
-
 import structlog
 
 from ucp_merchant.models import CheckoutSession, CheckoutState
+from ucp_merchant.utils import utcnow
 
 logger = structlog.get_logger(__name__)
 
@@ -90,7 +89,7 @@ class CheckoutStateMachine:
 
         previous = session.state
         session.state = target_state
-        now = datetime.utcnow()
+        now = utcnow()
         session.updated_at = now
         if target_state == CheckoutState.COMPLETED:
             session.completed_at = now
