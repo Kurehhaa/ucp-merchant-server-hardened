@@ -410,10 +410,10 @@ def create_app(settings: UCPMerchantSettings | None = None) -> FastAPI:
                     ) from exc
                 authorized = True
 
-            session = checkout_manager.complete_session(session_id)
-            order = order_manager.create_order(session)
-            # Update the session's order_id to match
-            session.order_id = order.id
+            # All-or-nothing: the session only becomes COMPLETED if the order exists.
+            session, order = checkout_manager.complete_with_order(
+                session_id, order_manager.create_order
+            )
             completed = True
             return {
                 "session": session.model_dump(mode="json"),

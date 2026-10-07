@@ -7,6 +7,7 @@ to manage the full checkout lifecycle from creation to completion.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable
 from typing import Any
 
 import structlog
@@ -22,6 +23,7 @@ from ucp_merchant.models import (
     CheckoutState,
     LineItem,
     Money,
+    Order,
 )
 
 logger = structlog.get_logger(__name__)
@@ -322,6 +324,47 @@ class CheckoutSessionManager:
         )
         session.line_items.append(line_item)
         return session
+
+    def complete_with_order(
+        self,
+        session_id: str,
+        create_order: Callable[[CheckoutSession], Order],
+    ) -> tuple[CheckoutSession, Order]:
+        """Complete a session and create its order as one all-or-nothing step.
+
+        The session is only marked COMPLETED if *create_order* succeeds.  If it
+        raises, the stored session is left exactly as it was (still ready), so
+        the checkout can be retried instead of ending up completed without an
+        order.
+
+        Returns
+        -------
+        tuple[CheckoutSession, Order]
+
+        Raises
+        ------
+        SessionNotFoundError
+        InvalidTransitionError
+            If the session is not ready for completion.
+        """
+        current = self.assert_ready_for_completion(session_id)
+
+        # Work on a copy: nothing is committed until the order exists.
+        completed = current.model_copy(deep=True)
+        self._state_machine.transition(completed, CheckoutState.COMPLETED)
+        completed.order_id = f"ord_{uuid.uuid4().hex[:16]}"
+
+        order = create_order(completed)
+        completed.order_id = order.id
+
+        self._sessions[session_id] = completed
+        logger.info(
+            "checkout_session_completed",
+            session_id=session_id,
+            order_id=order.id,
+            total=completed.total.amount,
+        )
+        return completed, order
 
     def _recalculate(self, session: CheckoutSession) -> CheckoutSession:
         """Recalculate totals, then refresh missing fields and state."""

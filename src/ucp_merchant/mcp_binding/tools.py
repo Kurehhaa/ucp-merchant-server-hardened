@@ -433,9 +433,10 @@ class MCPToolHandler:
 
         completed = False
         try:
-            session = self._checkout.complete_session(session_id)
-            # Also create the order
-            order = self._orders.create_order(session)
+            # All-or-nothing: the session only becomes COMPLETED if the order exists.
+            session, order = self._checkout.complete_with_order(
+                session_id, self._orders.create_order
+            )
             completed = True
         finally:
             if mandate is not None and verifier is not None and not completed:
