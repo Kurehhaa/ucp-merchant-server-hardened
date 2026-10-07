@@ -7,14 +7,11 @@ WORKDIR /build
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-# Install dependencies first (layer cache optimisation)
-COPY pyproject.toml ./
-RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
-    pip install --no-cache-dir . || true
-
-# Copy source and install the package
+# The package metadata references README.md, so it must be present for the build.
+COPY pyproject.toml README.md ./
 COPY src/ ./src/
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
+    pip install --no-cache-dir .
 
 # Stage 2: Runtime
 FROM python:3.11-slim AS runtime
@@ -25,9 +22,13 @@ RUN groupadd --gid 1000 appuser && \
 
 # Copy virtual environment from builder
 COPY --from=builder /opt/venv /opt/venv
+# The app listens on $PORT (default 8011 outside Docker); the image, compose
+# file and Kubernetes manifests all use container port 8000.
 ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    HOST=0.0.0.0 \
+    PORT=8000
 
 WORKDIR /app
 
